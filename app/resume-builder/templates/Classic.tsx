@@ -372,9 +372,7 @@ const educationTdStyle = {
   
 const renderEducation = () => (
   <>
-    {!pageSection?.isContinuation && (
     <SectionHeading title="EDUCATION" />
-    )}
       <table
       style={{
         width: "95%",
@@ -507,18 +505,14 @@ const renderSkills = () => {
 
   return (
     <>
-      {!pageSection?.isContinuation && (
-        <SectionHeading title="SKILLS" />
-      )}
+      <SectionHeading title="SKILLS" />
 
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",
           gap: "10px",
-          marginTop: pageSection?.isContinuation
-            ? "0px"
-            : "12px",
+          marginTop: "12px",
           fontSize: "14px",
         }}
       >
@@ -553,15 +547,11 @@ const renderCertificates = () => {
 
   return (
     <>
-      {!pageSection?.isContinuation && (
-        <SectionHeading title="CERTIFICATES" />
-      )}
+      <SectionHeading title="CERTIFICATES" />
 
       <div
         style={{
-          marginTop: pageSection?.isContinuation
-            ? "0px"
-            : "12px",
+          marginTop: "12px",
           fontSize: "14px",
           lineHeight: "26px",
         }}
@@ -590,17 +580,13 @@ const renderCertificates = () => {
 
 const renderPersonalDetails = () => (
   <>
-      {!pageSection?.isContinuation && (
       <SectionHeading title="PERSONAL DETAILS" />
-      )}
 
       <div
         style={{
           display: "flex",
           justifyContent: "center",
-          marginTop: pageSection?.isContinuation
-            ? "0px"
-            : "6px",
+          marginTop: "6px",
         }}
       >
         <table
@@ -620,7 +606,7 @@ const renderPersonalDetails = () => (
             data-type="father-name"
             data-splittable="true"
           >
-            <td style={plabelStyle}>Father's Name</td>
+            <td style={plabelStyle}>Father&apos;s Name</td>
             <td style={pvalueStyle}>{personal.fatherName}</td>
           </tr>
         )}
@@ -633,7 +619,7 @@ const renderPersonalDetails = () => (
             data-type="mother-name"
             data-splittable="true"
           >
-            <td style={plabelStyle}>Mother's Name</td>
+            <td style={plabelStyle}>Mother&apos;s Name</td>
             <td style={pvalueStyle}>{personal.motherName}</td>
           </tr>
         )}
@@ -725,18 +711,14 @@ const renderOtherPersonalDetails = () => {
 
   return (
     <>
-      {!pageSection?.isContinuation && (
-        <SectionHeading title="OTHER PERSONAL DETAILS" />
-      )}
+      <SectionHeading title="OTHER PERSONAL DETAILS" />
 
       <table
         style={{
           width: "100%",
           tableLayout: "fixed",
           borderCollapse: "collapse",
-          marginTop: pageSection?.isContinuation
-            ? "0px"
-            : "10px",
+          marginTop: "10px",
           fontSize: "14px",
         }}
       >
@@ -785,10 +767,6 @@ pageSection
     },
   ];
 
-    console.log(
-    "Declaration Items",
-    declarationItems
-  );
   const renderDeclaration = () => (
   <>
     {!pageSection?.isContinuation && (

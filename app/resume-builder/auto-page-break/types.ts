@@ -23,6 +23,14 @@ export interface PageSection {
 
   contentHeight: number;
 
+  /**
+   * Vertical space that belongs to a section's layout rather than one
+   * individual item (for example a table header, a wrapper margin, or a
+   * grid gap).  It is kept with every rendered part of a split section so
+   * that an item can never be placed below the page footer.
+   */
+  fixedContentHeight: number;
+
   height: number;
 
   splittable: boolean;

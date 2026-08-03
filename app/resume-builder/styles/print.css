@@ -3,7 +3,7 @@
 ========================================================= */
 
 @page {
-  size: A4;
+  size: 210mm 297mm;
   margin: 0;
 }
 
@@ -40,7 +40,9 @@
 
     min-height: 297mm !important;
 
-    height: auto !important;
+    height: 297mm !important;
+
+    max-height: 297mm !important;
 
     margin: 0 auto !important;
 

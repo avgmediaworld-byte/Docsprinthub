@@ -52,7 +52,7 @@ export default function Home() {
       Resume Builder
       </Link>
       <a href="#" className="hover:text-blue-600 transition">Letter Writer</a>
-      <a href="#" className="hover:text-blue-600 transition">PDF Tools</a>
+      <Link href="/pdf-tools" className="hover:text-blue-600 transition">PDF Tools</Link>
       <a href="#" className="hover:text-blue-600 transition">Contact</a>
       </div>
 
@@ -75,9 +75,11 @@ export default function Home() {
         </p>
 
         <div className="mt-8 flex justify-center gap-4">
-          <button className="bg-blue-600 text-white font-semibold px-6 py-3 rounded-xl shadow-md hover:bg-blue-700 transition">
-            Explore Tools
-          </button>
+          <Link href="/pdf-tools">
+            <button className="bg-blue-600 text-white font-semibold px-6 py-3 rounded-xl shadow-md hover:bg-blue-700 transition">
+              Explore Tools
+            </button>
+          </Link>
 
         <Link href="/resume-builder">
           <button className="bg-blue-600 text-white font-semibold px-6 py-4 rounded-xl shadow-md hover:bg-blue-700 hover:shadow-lg transition duration-300">
@@ -180,7 +182,7 @@ export default function Home() {
           <a href="#">Resume Builder</a>
           <a href="#">Letter Writer</a>
           <a href="#">Biodata Maker</a>
-          <a href="#">PDF Tools</a>
+          <Link href="/pdf-tools">PDF Tools</Link>
         </div>
       </div>
 

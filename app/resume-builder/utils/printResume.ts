@@ -38,7 +38,7 @@ ${styles}
 <style>
 
 @page{
-    size:A4;
+    size:210mm 297mm;
     margin:0;
 }
 
@@ -75,9 +75,11 @@ body{
 
     width:210mm !important;
 
-    min-height:296.5mm !important;
+    min-height:297mm !important;
 
-    height:auto !important;
+    height:297mm !important;
+
+    max-height:297mm !important;
 
     margin:0 auto !important;
 

@@ -12,7 +12,7 @@ export default class PageManager {
 
   private static readonly FOOTER_SPACE = 80;
 
-  private static readonly TOLERANCE = 10;
+  private static readonly SAFETY_SPACE = 12;
 
   private pages: DocumentPage[] = [];
 
@@ -84,7 +84,7 @@ private canFit(
 
   return (
     this.remainingHeight() >=
-    height - PageManager.TOLERANCE
+    height + PageManager.SAFETY_SPACE
   );
 
 }
@@ -120,13 +120,17 @@ private cloneSection(
 
     items: [],
 
-    contentHeight: 0,
+    contentHeight: section.fixedContentHeight,
+
+    fixedContentHeight: section.fixedContentHeight,
 
     isContinuation: false,
 
     headingHeight: section.headingHeight,
 
-    height: section.headingHeight,
+    height:
+      section.headingHeight +
+      section.fixedContentHeight,
   };
 
 }
@@ -145,12 +149,6 @@ private startContinuation(
 
   next.isContinuation = true;
 
-  next.headingHeight = 0;
-
-  next.height = 0;
-
-  next.contentHeight = 0;
-
   return next;
 
   
@@ -162,29 +160,12 @@ private startContinuation(
     page: DocumentPage,
     section: PageSection
   ) {
-    
-    console.log("PUSH SECTION", {
-      page: page.id,
-      section: section.name,
-      items: section.items.length,
-      height: section.height,
-      usedBefore: page.usedHeight,
-      remainingBefore: page.remainingHeight,
-    });
-
     page.sections.push(section);
 
     this.updateHeight(
       page,
       section.height
     );
-  console.log("UPDATED PAGE", {
-  page: page.id,
-  used: page.usedHeight,
-  remaining: page.remainingHeight,
-});
-    
-    
   }
 
       /**
@@ -202,15 +183,6 @@ private startContinuation(
     workingSection.height =
       workingSection.headingHeight +
       workingSection.contentHeight;
-
-      console.log({
-      section: workingSection.name,
-      items: workingSection.items.length,
-      heading: workingSection.headingHeight,
-      content: workingSection.contentHeight,
-      total: workingSection.height,
-    });
-
   }
 
   /**
@@ -219,6 +191,13 @@ private startContinuation(
   private paginateSection(
     section: PageSection
   ) {
+
+    // An empty source section has no measurable height.  Do not render it in
+    // the preview, otherwise a template heading could appear without being
+    // included in the page-break calculation.
+    if (section.height <= 0) {
+      return;
+    }
 
     if (!section.splittable) {
 
@@ -269,24 +248,9 @@ private startContinuation(
     const remaining =
       this.remainingHeight();
 
-    const SAFE_BOTTOM_SPACE = 12;
-
     const canFit =
       projectedHeight <=
-      (remaining - SAFE_BOTTOM_SPACE);
-
-        console.log({
-          page: this.currentPage().id,
-          section: section.name,
-          item: item.dataId,
-          itemHeight: item.height,
-          sectionItems: workingSection.items.length,
-          currentSectionHeight: workingSection.height,
-          projectedHeight,
-          remaining,
-          usedHeight: this.currentPage().usedHeight,
-          canFit,
-        });
+      (remaining - PageManager.SAFETY_SPACE);
 
         if (canFit) {
 
@@ -316,9 +280,7 @@ private startContinuation(
         this.startContinuation(
           section
         );
-      workingSection.height = 0;
-      workingSection.contentHeight = 0;
-      workingSection.items = [];
+
       // Add current item to continuation
       this.addItem(
         workingSection,

@@ -112,19 +112,6 @@ private static extractItems(
 
   }
 
-  // Debug (temporary)
-  console.log(
-    "SECTION:",
-    section.dataset.section,
-    "ITEMS:",
-    items.length,
-    items.map((i) => ({
-      type: i.type,
-      dataId: i.dataId,
-      height: i.height,
-    }))
-  );
-
   return items;
 
 }
@@ -156,35 +143,29 @@ static createSection(
     element.dataset.section ??
     "section";
 
-  let contentHeight: number;
-
-  // Item based sections
-if (
-  [
-    "education",
-    "experience",
-    "skills",
-    "certificates",
-    "personal-details",
-    "other-personal-details",
-    "declaration",
-  ].includes(sectionName)
-) {
-
-  contentHeight = items.reduce(
+  const itemHeight = items.reduce(
     (total, item) => total + item.height,
-    0
-  );
-
-} else {
-
-  contentHeight = Math.max(
     0,
-    HeightCalculator.measure(element) -
-      headingHeight
   );
 
-}
+  const measuredContentHeight = Math.max(
+    0,
+    HeightCalculator.measure(element) - headingHeight,
+  );
+
+  /**
+   * Items alone do not include wrapper layout, such as the Education table
+   * header, table/grid spacing, or the declaration signature spacing.  Keep
+   * that space in the pagination calculation as well.  If items share a
+   * horizontal row, their summed heights can be larger than the section's
+   * physical height; retaining that larger value is deliberate safety space.
+   */
+  const fixedContentHeight = Math.max(
+    0,
+    measuredContentHeight - itemHeight,
+  );
+
+  const contentHeight = itemHeight + fixedContentHeight;
 
   return {
 
@@ -197,6 +178,8 @@ if (
     headingHeight,
 
     contentHeight,
+
+    fixedContentHeight,
 
     height:
       headingHeight +
