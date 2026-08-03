@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import * as QRCode from "qrcode";
 
@@ -104,7 +105,7 @@ export default function QrGeneratorPage() {
   function handleLogo(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     if (file && !["image/png", "image/jpeg"].includes(file.type)) {
-      setError("Logo ke liye sirf PNG ya JPG choose kijiye.");
+      setError("Please choose a PNG or JPG logo.");
     } else {
       setLogo(file);
       setError("");
@@ -127,7 +128,7 @@ export default function QrGeneratorPage() {
       canvas.width = size;
       canvas.height = size;
       const context = canvas.getContext("2d");
-      if (!context) throw new Error("QR canvas load nahi hua.");
+      if (!context) throw new Error("The QR canvas could not be loaded.");
       context.drawImage(qrImage, 0, 0, size, size);
       const logoSize = Math.round(size * 0.19);
       const position = (size - logoSize) / 2;
@@ -141,33 +142,33 @@ export default function QrGeneratorPage() {
         setError("");
       }
     }).catch((caught) => {
-      if (!cancelled) setError(caught instanceof Error ? caught.message : "QR generate nahi ho saka.");
+      if (!cancelled) setError(caught instanceof Error ? caught.message : "The QR code could not be generated.");
     });
     return () => { cancelled = true; };
   }, [background, content, correction, foreground, logo, margin, size]);
 
   async function copyContent() {
-    if (!content) return setError("Pehle QR content fill kijiye.");
+    if (!content) return setError("Please fill in the QR content first.");
     try {
       await navigator.clipboard.writeText(content);
-      setNotice("QR content copy ho gaya.");
+      setNotice("The QR content was copied.");
     } catch {
-      setError("Copy allow nahi hua. Browser permission check kijiye.");
+      setError("Copying was not allowed. Check your browser permissions.");
     }
   }
 
   async function downloadPng() {
-    if (!content || !preview) return setError("Pehle QR content fill kijiye.");
+    if (!content || !preview) return setError("Please fill in the QR content first.");
     const blob = await (await fetch(preview)).blob();
     downloadBlob(blob, "docsprinthub-qr.png");
-    setNotice("PNG download start ho gaya hai.");
+    setNotice("Your PNG download has started.");
   }
 
   async function downloadSvg() {
-    if (!content) return setError("Pehle QR content fill kijiye.");
+    if (!content) return setError("Please fill in the QR content first.");
     const svg = await QRCode.toString(content, { type: "svg", width: size, margin, errorCorrectionLevel: correction, color: { dark: foreground, light: background } });
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), "docsprinthub-qr.svg");
-    setNotice(logo ? "SVG download start ho gaya hai. SVG mein uploaded logo include nahi hota." : "SVG download start ho gaya hai.");
+    setNotice(logo ? "Your SVG download has started. Uploaded logos are not included in SVG files." : "Your SVG download has started.");
   }
 
   function reset() {
@@ -175,10 +176,10 @@ export default function QrGeneratorPage() {
   }
 
   return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8"><Link href="/" className="text-2xl font-bold tracking-tight sm:text-3xl">DocSprint<span className="text-blue-600">Hub</span></Link><Link href="/pdf-tools" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 sm:px-5">PDF Tools</Link></div></header>
-    <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-8 text-center sm:px-8 sm:py-10"><p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p><h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">QR Generator</h1><p className="mx-auto mt-3 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">Create custom QR codes for links, payments, contact details, Wi-Fi aur more.</p></section>
+    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8"><Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 rounded-lg" priority />DocSprint<span className="text-blue-600">Hub</span></Link><Link href="/pdf-tools" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 sm:px-5">PDF Tools</Link></div></header>
+    <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-8 text-center sm:px-8 sm:py-10"><p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p><h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">QR Generator</h1><p className="mx-auto mt-3 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">Create custom QR codes for links, payments, contact details, Wi-Fi, and more.</p></section>
     <section className="mx-auto grid max-w-7xl gap-7 px-5 py-7 sm:px-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(330px,0.8fr)] lg:py-10">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7"><h2 className="text-2xl font-bold">QR content</h2><p className="mt-2 text-slate-600">QR type select karke information fill kijiye.</p>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7"><h2 className="text-2xl font-bold">QR content</h2><p className="mt-2 text-slate-600">Choose a QR type and enter the required information.</p>
         <div className="mt-6 flex flex-wrap gap-2">{kinds.map((option) => <button key={option.id} type="button" onClick={() => selectKind(option.id)} className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${kind === option.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-blue-50 hover:text-blue-700"}`}>{option.label}</button>)}</div>
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           {(kind === "url" || kind === "text") && <label className="block sm:col-span-2"><span className="text-sm font-bold text-slate-800">{kind === "url" ? "Website URL" : "Text"}</span><textarea value={fields.value} onChange={(event) => updateField("value", event.target.value)} rows={kind === "text" ? 5 : 2} placeholder={kind === "url" ? "https://example.com" : "Write text for the QR code"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>}
@@ -187,18 +188,18 @@ export default function QrGeneratorPage() {
           {kind === "wifi" && <><Field label="Wi-Fi name (SSID)" value={fields.name} onChange={(value) => updateField("name", value)} /><Field label="Wi-Fi password" type="password" value={fields.password} onChange={(value) => updateField("password", value)} /><label className="block"><span className="text-sm font-bold text-slate-800">Security type</span><select value={fields.encryption} onChange={(event) => updateField("encryption", event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option>WPA</option><option>WEP</option><option>nopass</option></select></label></>}
           {kind === "contact" && <><Field label="First name" value={fields.firstName} onChange={(value) => updateField("firstName", value)} /><Field label="Last name" value={fields.lastName} onChange={(value) => updateField("lastName", value)} /><Field label="Phone" value={fields.phone} onChange={(value) => updateField("phone", value)} /><Field label="Email" type="email" value={fields.email} onChange={(value) => updateField("email", value)} /><Field label="Organization" value={fields.organization} onChange={(value) => updateField("organization", value)} /><Field label="Website" value={fields.website} onChange={(value) => updateField("website", value)} /></>}
         </div>
-        <div className="mt-8 border-t border-slate-200 pt-6"><h2 className="text-xl font-bold">Customize</h2><div className="mt-4 grid gap-4 sm:grid-cols-2"><label><span className="text-sm font-bold">QR color</span><input type="color" value={foreground} onChange={(event) => setForeground(event.target.value)} className="mt-2 block h-12 w-full cursor-pointer rounded-lg border border-slate-300 bg-white p-1" /></label><label><span className="text-sm font-bold">Background color</span><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} className="mt-2 block h-12 w-full cursor-pointer rounded-lg border border-slate-300 bg-white p-1" /></label></div><div className="mt-5"><span className="text-sm font-bold text-slate-800">Download resolution</span><div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">{resolutionPresets.map((preset) => <button key={preset.size} type="button" onClick={() => setSize(preset.size)} className={`rounded-xl border px-3 py-3 text-left transition ${size === preset.size ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600" : "border-slate-200 hover:border-blue-300 hover:bg-slate-50"}`}><span className="block font-bold">{preset.label}</span><span className="mt-1 block text-xs text-slate-500">{preset.detail}</span></button>)}</div><p className="mt-2 text-xs text-slate-500">Selected: {size} × {size}px. Preview compact dikhega, download isi resolution mein hoga.</p></div><div className="mt-5 grid gap-4 sm:grid-cols-2"><label><span className="text-sm font-bold">Custom size: {size}px</span><input type="range" min="256" max="2048" step="32" value={size} onChange={(event) => setSize(Number(event.target.value))} className="mt-4 w-full accent-blue-600" /></label><label><span className="text-sm font-bold">Margin: {margin}</span><input type="range" min="0" max="6" value={margin} onChange={(event) => setMargin(Number(event.target.value))} className="mt-4 w-full accent-blue-600" /></label><label><span className="text-sm font-bold">Error correction</span><select value={correction} onChange={(event) => setCorrection(event.target.value as QRCode.QRCodeErrorCorrectionLevel)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="L">Low</option><option value="M">Medium</option><option value="Q">Quartile</option><option value="H">High</option></select></label><label><span className="text-sm font-bold">Center logo (optional)</span><span className="mt-2 flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50">{logo ? logo.name : "Choose PNG or JPG"}<input type="file" accept="image/png,image/jpeg" className="sr-only" onChange={handleLogo} /></span></label></div></div>
+        <div className="mt-8 border-t border-slate-200 pt-6"><h2 className="text-xl font-bold">Customize</h2><div className="mt-4 grid gap-4 sm:grid-cols-2"><label><span className="text-sm font-bold">QR color</span><input type="color" value={foreground} onChange={(event) => setForeground(event.target.value)} className="mt-2 block h-12 w-full cursor-pointer rounded-lg border border-slate-300 bg-white p-1" /></label><label><span className="text-sm font-bold">Background color</span><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} className="mt-2 block h-12 w-full cursor-pointer rounded-lg border border-slate-300 bg-white p-1" /></label></div><div className="mt-5"><span className="text-sm font-bold text-slate-800">Download resolution</span><div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">{resolutionPresets.map((preset) => <button key={preset.size} type="button" onClick={() => setSize(preset.size)} className={`rounded-xl border px-3 py-3 text-left transition ${size === preset.size ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600" : "border-slate-200 hover:border-blue-300 hover:bg-slate-50"}`}><span className="block font-bold">{preset.label}</span><span className="mt-1 block text-xs text-slate-500">{preset.detail}</span></button>)}</div><p className="mt-2 text-xs text-slate-500">Selected: {size} × {size}px. The preview is compact; the download uses this resolution.</p></div><div className="mt-5 grid gap-4 sm:grid-cols-2"><label><span className="text-sm font-bold">Custom size: {size}px</span><input type="range" min="256" max="2048" step="32" value={size} onChange={(event) => setSize(Number(event.target.value))} className="mt-4 w-full accent-blue-600" /></label><label><span className="text-sm font-bold">Margin: {margin}</span><input type="range" min="0" max="6" value={margin} onChange={(event) => setMargin(Number(event.target.value))} className="mt-4 w-full accent-blue-600" /></label><label><span className="text-sm font-bold">Error correction</span><select value={correction} onChange={(event) => setCorrection(event.target.value as QRCode.QRCodeErrorCorrectionLevel)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="L">Low</option><option value="M">Medium</option><option value="Q">Quartile</option><option value="H">High</option></select></label><label><span className="text-sm font-bold">Center logo (optional)</span><span className="mt-2 flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50">{logo ? logo.name : "Choose PNG or JPG"}<input type="file" accept="image/png,image/jpeg" className="sr-only" onChange={handleLogo} /></span></label></div></div>
       </section>
-      <aside className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-5 sm:p-7"><h2 className="text-2xl font-bold">Live preview</h2><p className="mt-2 text-sm leading-6 text-slate-600">QR scan karne se isi information par action hoga.</p><div className="mt-6 flex min-h-72 items-center justify-center rounded-2xl bg-slate-100 p-5">{content && preview ? <img src={preview} alt="Generated QR code preview" className="h-auto max-w-full rounded-lg shadow-sm" style={{ width: Math.min(size, 360) }} /> : <p className="text-center text-sm text-slate-500">QR preview ke liye required fields fill kijiye.</p>}</div>{content && <div className="mt-5 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600 break-all">{content}</div>} {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{notice}</p>}<div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-1"><button type="button" onClick={downloadPng} className="rounded-xl bg-blue-600 px-4 py-3 font-bold text-white hover:bg-blue-700">Download PNG</button><button type="button" onClick={downloadSvg} className="rounded-xl border border-blue-600 px-4 py-3 font-bold text-blue-700 hover:bg-blue-50">Download SVG</button><button type="button" onClick={copyContent} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Copy content</button><button type="button" onClick={reset} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Reset</button></div><p className="mt-5 text-xs leading-5 text-slate-500">Content aur customization aapke browser mein hi process hote hain.</p></aside>
+      <aside className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-5 sm:p-7"><h2 className="text-2xl font-bold">Live preview</h2><p className="mt-2 text-sm leading-6 text-slate-600">Scanning this QR code will use the information shown here.</p><div className="mt-6 flex min-h-72 items-center justify-center rounded-2xl bg-slate-100 p-5">{content && preview ? <img src={preview} alt="Generated QR code preview" className="h-auto max-w-full rounded-lg shadow-sm" style={{ width: Math.min(size, 360) }} /> : <p className="text-center text-sm text-slate-500">Fill in the required fields to preview the QR code.</p>}</div>{content && <div className="mt-5 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600 break-all">{content}</div>} {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{notice && <p role="status" className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{notice}</p>}<div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-1"><button type="button" onClick={downloadPng} className="rounded-xl bg-blue-600 px-4 py-3 font-bold text-white hover:bg-blue-700">Download PNG</button><button type="button" onClick={downloadSvg} className="rounded-xl border border-blue-600 px-4 py-3 font-bold text-blue-700 hover:bg-blue-50">Download SVG</button><button type="button" onClick={copyContent} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Copy content</button><button type="button" onClick={reset} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Reset</button></div><p className="mt-5 text-xs leading-5 text-slate-500">Content and customization are processed locally in your browser.</p></aside>
     </section>
   </main>;
 }
 
 function loadImage(source: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
+    const image = new window.Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Logo load nahi hua."));
+    image.onerror = () => reject(new Error("The logo could not be loaded."));
     image.src = source;
   });
 }

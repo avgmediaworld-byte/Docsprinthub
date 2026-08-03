@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useState } from "react";
 import JSZip from "jszip";
 import { degrees, PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { LanguageSelector } from "../components/LanguageProvider";
 
 type Tool =
   | "merge"
@@ -133,7 +135,7 @@ async function selectedCopy(sourcePdf: PDFDocument, pageIndexes: number[]) {
 
 function canvasToBlob(canvas: HTMLCanvasElement, type: "image/png" | "image/jpeg", quality?: number) {
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Image create nahi ho saka."))), type, quality);
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("The image could not be created."))), type, quality);
   });
 }
 
@@ -160,7 +162,7 @@ function imageDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.onerror = () => reject(new Error("Image preview create nahi ho saka."));
+    reader.onerror = () => reject(new Error("The image preview could not be created."));
     reader.readAsDataURL(file);
   });
 }
@@ -177,7 +179,7 @@ async function renderPdfThumbnail(file: File) {
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
     const context = canvas.getContext("2d");
-    if (!context) throw new Error("Browser canvas start nahi ho saka.");
+    if (!context) throw new Error("The browser canvas could not be started.");
     await page.render({ canvas, canvasContext: context, viewport }).promise;
     return canvas.toDataURL("image/png");
   } finally {
@@ -206,7 +208,7 @@ async function renderPdfPages(
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext("2d");
-      if (!context) throw new Error("Browser canvas start nahi ho saka.");
+    if (!context) throw new Error("The browser canvas could not be started.");
       await page.render({ canvas, canvasContext: context, viewport }).promise;
       const blob = await canvasToBlob(canvas, imageType, imageType === "image/jpeg" ? jpegQuality : undefined);
       pages.push({ blob, bytes: new Uint8Array(await blob.arrayBuffer()), width: originalViewport.width, height: originalViewport.height });
@@ -299,7 +301,7 @@ export default function PdfToolsPage() {
     };
     const invalid = added.find((file) => !isValid(file));
     if (invalid) {
-      setError(isImageInput ? "Sirf JPG aur PNG images select kijiye." : "Valid PDF file select kijiye.");
+      setError(isImageInput ? "Please select JPG or PNG images only." : "Please select a valid PDF file.");
     } else if (added.length) {
       setFiles((current) => (allowsMultiple ? [...current, ...added] : [added[0]]));
       setError("");
@@ -343,10 +345,10 @@ export default function PdfToolsPage() {
   async function runTool() {
     setError("");
     setStatus("");
-    if (!files.length) return setError("Pehle file select kijiye.");
-    if (activeTool === "merge" && files.length < 2) return setError("Merge ke liye kam se kam 2 PDFs select kijiye.");
-    if (activeTool === "protect" && password.length < 4) return setError("PDF password kam se kam 4 characters ka rakhiye.");
-    if (activeTool === "unlock" && !password) return setError("PDF ka current password enter kijiye.");
+    if (!files.length) return setError("Please select a file first.");
+    if (activeTool === "merge" && files.length < 2) return setError("Please select at least two PDFs to merge.");
+    if (activeTool === "protect" && password.length < 4) return setError("Use a PDF password with at least four characters.");
+    if (activeTool === "unlock" && !password) return setError("Enter the current PDF password.");
 
     setIsWorking(true);
     try {
@@ -358,7 +360,7 @@ export default function PdfToolsPage() {
           pages.forEach((page) => merged.addPage(page));
         }
         downloadPdf(await merged.save({ useObjectStreams: true }), "merged-document.pdf");
-        setStatus(`${files.length} PDFs merge ho gaye. Download start ho gaya hai.`);
+        setStatus(`${files.length} PDFs were merged. Your download has started.`);
         return;
       }
 
@@ -374,7 +376,7 @@ export default function PdfToolsPage() {
           page.drawImage(image, { x: (page.getWidth() - width) / 2, y: (page.getHeight() - height) / 2, width, height });
         }
         downloadPdf(await pdf.save({ useObjectStreams: true }), "images-to-pdf.pdf");
-        setStatus("Images se A4 PDF ban gaya. Download start ho gaya hai.");
+        setStatus("An A4 PDF was created from the images. Your download has started.");
         return;
       }
 
@@ -390,7 +392,7 @@ export default function PdfToolsPage() {
           imageCount += pages.length;
         }
         downloadBlob(await zip.generateAsync({ type: "blob" }), files.length === 1 ? outputName(sourceFile.name, "images", "zip") : `converted-${imageFormat}-images.zip`);
-        setStatus(`${files.length} PDFs ke ${imageCount} image files ZIP mein download ho rahi hain.`);
+        setStatus(`${imageCount} images from ${files.length} PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
@@ -403,19 +405,19 @@ export default function PdfToolsPage() {
           page.drawImage(image, { x: 0, y: 0, width: pageImage.width, height: pageImage.height });
         }
         downloadPdf(await unlocked.save({ useObjectStreams: true }), outputName(sourceFile.name, "unlocked"));
-        setStatus("Password-free visual copy download ho gayi. Is copy mein searchable text preserve nahi hota.");
+        setStatus("A password-free visual copy is downloading. Searchable text is not preserved in this copy.");
         return;
       }
 
       if (activeTool === "word" || activeTool === "excel") {
         const textPages = await extractPdfText(sourceFile);
-        if (!textPages.some(Boolean)) throw new Error("PDF mein selectable text nahi mila. Scanned document ke liye OCR tool use kijiye.");
+        if (!textPages.some(Boolean)) throw new Error("No selectable text was found in the PDF. Use the OCR tool for scanned documents.");
         if (activeTool === "word") {
           const { Document, Packer, Paragraph } = await import("docx");
           const children = textPages.flatMap((text, index) => [new Paragraph({ text: `Page ${index + 1}` }), new Paragraph({ text: text || " " })]);
           const wordDocument = new Document({ sections: [{ children }] });
           downloadBlob(await Packer.toBlob(wordDocument), outputName(sourceFile.name, "text", "docx"));
-          setStatus("PDF text Word file mein export ho gaya. Download start ho gaya hai.");
+          setStatus("PDF text was exported to a Word file. Your download has started.");
         } else {
           const XLSX = await import("xlsx");
           const workbook = XLSX.utils.book_new();
@@ -423,7 +425,7 @@ export default function PdfToolsPage() {
           XLSX.utils.book_append_sheet(workbook, sheet, "PDF text");
           const bytes = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
           downloadBlob(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), outputName(sourceFile.name, "text", "xlsx"));
-          setStatus("PDF text Excel file mein export ho gaya. Download start ho gaya hai.");
+          setStatus("PDF text was exported to an Excel file. Your download has started.");
         }
         return;
       }
@@ -445,7 +447,7 @@ export default function PdfToolsPage() {
             output.push(`--- Page ${index + 1} ---\n${result.data.text.trim()}`);
           }
           downloadBlob(new Blob([output.join("\n\n")], { type: "text/plain;charset=utf-8" }), outputName(sourceFile.name, "ocr", "txt"));
-          setStatus("OCR text ready hai. Download start ho gaya hai.");
+          setStatus("OCR text is ready. Your download has started.");
         } finally {
           await worker.terminate();
         }
@@ -461,7 +463,7 @@ export default function PdfToolsPage() {
           permissions: { printing: "highResolution", modifying: false, copying: false, annotating: false, fillingForms: true, contentAccessibility: true, documentAssembly: false },
         });
         downloadPdf(await protectedPdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "protected"));
-        setStatus("Password-protected PDF download ke liye ready hai.");
+        setStatus("Your password-protected PDF is ready to download.");
         return;
       }
 
@@ -481,7 +483,7 @@ export default function PdfToolsPage() {
         }
         const compressedBytes = await compressedPdf.save({ useObjectStreams: true });
         downloadPdf(compressedBytes, outputName(sourceFile.name, "compressed"));
-        setStatus(`Compressed ${formatBytes(sourceFile.size)} se ${formatBytes(compressedBytes.byteLength)} (${profile.label}). Download start ho gaya hai.`);
+        setStatus(`Compressed from ${formatBytes(sourceFile.size)} to ${formatBytes(compressedBytes.byteLength)} (${profile.label}). Your download has started.`);
         return;
       }
 
@@ -495,24 +497,24 @@ export default function PdfToolsPage() {
           zip.file(`page-${pageIndex + 1}.pdf`, await singlePagePdf.save({ useObjectStreams: true }));
         }
         downloadBlob(await zip.generateAsync({ type: "blob" }), outputName(sourceFile.name, "split", "zip"));
-        setStatus(`${pageIndexes.length} separate PDFs ZIP mein download ho rahi hain.`);
+        setStatus(`${pageIndexes.length} separate PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
       if (activeTool === "extract" || activeTool === "reorder") {
         const result = await selectedCopy(sourcePdf, pageIndexes);
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, activeTool === "extract" ? "selected-pages" : "reordered"));
-        setStatus(activeTool === "extract" ? "Selected pages ka PDF ready hai." : "Page order update ho gaya. Download start ho gaya hai.");
+        setStatus(activeTool === "extract" ? "The PDF with the selected pages is ready." : "The page order was updated. Your download has started.");
         return;
       }
 
       if (activeTool === "delete") {
         const deleted = new Set(pageIndexes);
         const remaining = sourcePdf.getPageIndices().filter((index) => !deleted.has(index));
-        if (!remaining.length) throw new Error("Saare pages delete nahi kiye ja sakte. Kam se kam ek page bachaiye.");
+        if (!remaining.length) throw new Error("You cannot delete every page. Keep at least one page.");
         const result = await selectedCopy(sourcePdf, remaining);
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, "pages-removed"));
-        setStatus("Selected pages remove ho gaye. Download start ho gaya hai.");
+        setStatus("The selected pages were removed. Your download has started.");
         return;
       }
 
@@ -522,12 +524,12 @@ export default function PdfToolsPage() {
           page.setRotation(degrees((page.getRotation().angle + rotation) % 360));
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "rotated"));
-        setStatus("Selected pages rotate ho gaye. Download start ho gaya hai.");
+        setStatus("The selected pages were rotated. Your download has started.");
         return;
       }
 
       if (activeTool === "watermark") {
-        if (!watermark.trim()) throw new Error("Watermark text enter kijiye.");
+        if (!watermark.trim()) throw new Error("Enter watermark text.");
         const font = await sourcePdf.embedFont(StandardFonts.HelveticaBold);
         pageIndexes.forEach((index) => {
           const page = sourcePdf.getPage(index);
@@ -536,7 +538,7 @@ export default function PdfToolsPage() {
           page.drawText(watermark, { x: (page.getWidth() - textWidth) / 2, y: page.getHeight() / 2, size: fontSize, font, color: rgb(0.75, 0.08, 0.08), opacity: 0.28, rotate: degrees(35) });
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "watermarked"));
-        setStatus("Watermark add ho gaya. Download start ho gaya hai.");
+        setStatus("The watermark was added. Your download has started.");
         return;
       }
 
@@ -549,21 +551,21 @@ export default function PdfToolsPage() {
           page.drawText(text, { x: (page.getWidth() - font.widthOfTextAtSize(text, fontSize)) / 2, y: 16, size: fontSize, font, color: rgb(0.12, 0.12, 0.12) });
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "numbered"));
-        setStatus("Page numbers add ho gaye. Download start ho gaya hai.");
+        setStatus("Page numbers were added. Your download has started.");
         return;
       }
 
       if (activeTool === "crop") {
-        if (cropMargin < 0) throw new Error("Crop margin 0 ya positive number hona chahiye.");
+        if (cropMargin < 0) throw new Error("The crop margin must be zero or a positive number.");
         pageIndexes.forEach((index) => {
           const page = sourcePdf.getPage(index);
           const width = page.getWidth() - cropMargin * 2;
           const height = page.getHeight() - cropMargin * 2;
-          if (width <= 0 || height <= 0) throw new Error("Crop margin page ke liye bahut bada hai.");
+          if (width <= 0 || height <= 0) throw new Error("The crop margin is too large for this page.");
           page.setCropBox(cropMargin, cropMargin, width, height);
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "cropped"));
-        setStatus("Margins crop ho gaye. Download start ho gaya hai.");
+        setStatus("The margins were cropped. Your download has started.");
         return;
       }
 
@@ -573,28 +575,28 @@ export default function PdfToolsPage() {
         if (metadata.subject) sourcePdf.setSubject(metadata.subject);
         if (metadata.keywords) sourcePdf.setKeywords(metadata.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean));
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "metadata"));
-        setStatus("PDF metadata update ho gaya. Download start ho gaya hai.");
+        setStatus("The PDF metadata was updated. Your download has started.");
         return;
       }
 
       downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "optimized"));
-      setStatus("PDF optimize ho gaya. Final file size content par depend karega.");
+      setStatus("The PDF was optimized. The final size depends on its content.");
     } catch (caughtError) {
-      const message = caughtError instanceof Error ? caughtError.message : "PDF process nahi ho saka.";
-      setError(message.toLowerCase().includes("password") || message.toLowerCase().includes("encrypted") ? "Password-protected PDF ke liye correct password use kijiye." : message);
+      const message = caughtError instanceof Error ? caughtError.message : "The PDF could not be processed.";
+      setError(message.toLowerCase().includes("password") || message.toLowerCase().includes("encrypted") ? "Use the correct password for this protected PDF." : message);
     } finally {
       setIsWorking(false);
     }
   }
 
   const accept = isImageInput ? "image/jpeg,image/png,.jpg,.jpeg,.png" : acceptsPdfOrImage ? "application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" : "application/pdf,.pdf";
-  const uploadLabel = isImageInput ? "JPG ya PNG images choose kijiye" : acceptsPdfOrImage ? "PDF, JPG ya PNG choose kijiye" : activeTool === "merge" ? "PDF files choose kijiye" : "PDF file choose kijiye";
+  const uploadLabel = isImageInput ? "Choose JPG or PNG images" : acceptsPdfOrImage ? "Choose a PDF, JPG, or PNG file" : activeTool === "merge" ? "Choose PDF files" : "Choose a PDF file";
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-          <Link href="/" className="text-2xl font-bold tracking-tight sm:text-3xl">DocSprint<span className="text-blue-600">Hub</span></Link>
+          <div className="flex items-center gap-5"><LanguageSelector variant="light" /><Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 rounded-lg" priority />DocSprint<span className="text-blue-600">Hub</span></Link></div>
           <Link href="/resume-builder" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 sm:px-5">Resume Builder</Link>
         </div>
       </header>
@@ -602,7 +604,7 @@ export default function PdfToolsPage() {
       <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-7 text-center sm:px-8 sm:py-9">
         <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p>
         <h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">PDF Tools</h1>
-        <p className="mx-auto mt-3 max-w-3xl text-base leading-7 text-slate-600 sm:text-lg">Merge, convert, organize, protect aur edit PDF files — directly aapke browser mein.</p>
+        <p className="mx-auto mt-3 max-w-3xl text-base leading-7 text-slate-600 sm:text-lg">Merge, convert, organize, protect, and edit PDF files directly in your browser.</p>
       </section>
 
       <nav aria-label="PDF tool menu" className="border-b border-slate-200 bg-white shadow-sm">
@@ -646,14 +648,14 @@ export default function PdfToolsPage() {
           >
             {files.length === 0 ? (
               <div className="flex flex-col items-center justify-center px-5 py-9 text-center">
-                <span className="text-lg font-bold text-slate-900">{isDragging ? "Files yahan drop kijiye" : uploadLabel}</span>
-                <span className="mt-2 text-sm text-slate-600">{isDragging ? "Drop karte hi file add ho jayegi" : allowsMultiple ? "Files ko drag & drop kijiye, ya select button use kijiye. Multiple files allowed hain." : "File ko drag & drop kijiye, ya select button use kijiye. Nayi file purani replace karegi."}</span>
+                <span className="text-lg font-bold text-slate-900">{isDragging ? "Drop files here" : uploadLabel}</span>
+                <span className="mt-2 text-sm text-slate-600">{isDragging ? "Files will be added as soon as you drop them." : allowsMultiple ? "Drag and drop files, or use the select button. Multiple files are allowed." : "Drag and drop a file, or use the select button. A new file will replace the previous one."}</span>
                 <label className="mt-4 cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700">Select files<input className="sr-only" type="file" accept={accept} multiple={allowsMultiple} onChange={handleFiles} /></label>
               </div>
             ) : (
               <div className="p-4 sm:p-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div><h3 className="font-bold text-slate-900">Selected {files.length === 1 ? "file" : "files"}</h3><p className="mt-1 text-xs text-slate-600">Yahin par preview dekhiye, ya aur files add kijiye.</p></div>
+                  <div><h3 className="font-bold text-slate-900">Selected {files.length === 1 ? "file" : "files"}</h3><p className="mt-1 text-xs text-slate-600">Preview files here, or add more files.</p></div>
                   <div className="flex items-center gap-3"><label className="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700">Add files<input className="sr-only" type="file" accept={accept} multiple={allowsMultiple} onChange={handleFiles} /></label><button type="button" onClick={() => setFiles([])} className="text-sm font-semibold text-blue-700 hover:text-blue-900">Clear all</button></div>
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -691,7 +693,7 @@ export default function PdfToolsPage() {
                           <p className="truncate text-sm font-semibold text-slate-900" title={file.name}>{allowsMultiple && `${index + 1}. `}{file.name}</p>
                           <p className="mt-1 text-xs text-slate-500">{formatBytes(file.size)}</p>
                           <div className="mt-3 flex flex-wrap items-center gap-1">
-                            {allowsMultiple && <span className="mr-1 cursor-grab rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-500" title="Mouse se pakad kar card ko move kijiye">↕ Drag</span>}
+                            {allowsMultiple && <span className="mr-1 cursor-grab rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-500" title="Drag this card with your mouse to change its order">↕ Drag</span>}
                             {allowsMultiple && <><button type="button" disabled={index === 0} onClick={() => moveFile(index, -1)} className="rounded-md px-2 py-1 text-xs font-bold text-slate-600 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-30">Up</button><button type="button" disabled={index === files.length - 1} onClick={() => moveFile(index, 1)} className="rounded-md px-2 py-1 text-xs font-bold text-slate-600 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-30">Down</button></>}
                             <button type="button" onClick={() => setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))} className="rounded-md px-2 py-1 text-xs font-bold text-slate-600 hover:bg-red-50 hover:text-red-700">Remove</button>
                           </div>
@@ -700,13 +702,13 @@ export default function PdfToolsPage() {
                     );
                   })}
                 </div>
-                <p className="mt-4 text-center text-xs text-slate-500">{allowsMultiple ? "Cards ko mouse se drag karke merge order set kijiye. Nayi files ko is box mein drag & drop se add bhi kar sakte hain." : "Aap is box mein file drag & drop karke replace kar sakte hain."}</p>
+                <p className="mt-4 text-center text-xs text-slate-500">{allowsMultiple ? "Drag cards with your mouse to set the merge order. You can also add new files by dragging them into this area." : "You can replace the file by dragging and dropping a new one into this area."}</p>
               </div>
             )}
-            {isDragging && files.length > 0 && <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-blue-100/95 text-center text-lg font-bold text-blue-800">Files yahan drop kijiye</div>}
+            {isDragging && files.length > 0 && <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-blue-100/95 text-center text-lg font-bold text-blue-800">Drop files here</div>}
           </div>
 
-          {needsPages && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : activeTool === "reorder" ? "New page order" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder={activeTool === "reorder" ? "e.g. 3, 1, 2" : "All pages (or e.g. 1, 3-5)"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Blank chhodne par all pages select honge.</span></label>}
+          {needsPages && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : activeTool === "reorder" ? "New page order" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder={activeTool === "reorder" ? "e.g. 3, 1, 2" : "All pages (or e.g. 1, 3-5)"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Leave blank to select all pages.</span></label>}
 
           {activeTool === "rotate" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Rotate clockwise</span><select value={rotation} onChange={(event) => setRotation(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value={90}>90 degrees</option><option value={180}>180 degrees</option><option value={270}>270 degrees</option></select></label>}
           {activeTool === "pdfToImage" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Image format</span><select value={imageFormat} onChange={(event) => setImageFormat(event.target.value as "png" | "jpg")} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="png">PNG (best quality)</option><option value="jpg">JPG (smaller files)</option></select></label>}
@@ -714,20 +716,20 @@ export default function PdfToolsPage() {
           {activeTool === "crop" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Equal margin to crop (PDF points)</span><input type="number" min="0" value={cropMargin} onChange={(event) => setCropMargin(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>}
           {activeTool === "metadata" && <div className="mt-5 grid gap-4 sm:grid-cols-2">{(["title", "author", "subject", "keywords"] as const).map((field) => <label key={field} className="block"><span className="text-sm font-bold capitalize text-slate-800">{field}</span><input value={metadata[field]} onChange={(event) => setMetadata((current) => ({ ...current, [field]: event.target.value }))} placeholder={field === "keywords" ? "resume, job, profile" : `PDF ${field}`} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>)}</div>}
           {(activeTool === "protect" || activeTool === "unlock") && <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="block"><span className="text-sm font-bold text-slate-800">{activeTool === "unlock" ? "Current PDF password" : "Open password"}</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>{activeTool === "protect" && <label className="block"><span className="text-sm font-bold text-slate-800">Owner password (optional)</span><input type="password" value={ownerPassword} onChange={(event) => setOwnerPassword(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>}</div>}
-          {activeTool === "ocr" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">OCR language</span><select value={ocrLanguage} onChange={(event) => setOcrLanguage(event.target.value as "eng" | "hin")} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="eng">English</option><option value="hin">Hindi</option></select><span className="mt-2 block text-xs text-slate-500">First use par OCR language data download ho sakta hai.</span></label>}
+          {activeTool === "ocr" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">OCR language</span><select value={ocrLanguage} onChange={(event) => setOcrLanguage(event.target.value as "eng" | "hin")} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="eng">English</option><option value="hin">Hindi</option></select><span className="mt-2 block text-xs text-slate-500">Language data may download the first time you use OCR.</span></label>}
           {activeTool === "optimize" && <>
             <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Compression level</span><select value={compressionLevel} onChange={(event) => setCompressionLevel(event.target.value as "high" | "balanced" | "small")} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="high">High quality — larger file</option><option value="balanced">Recommended — high quality</option><option value="small">Smallest file — lower quality</option></select></label>
             <details className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700" open={compressionLevel === "small"}>
               <summary className="cursor-pointer font-semibold text-slate-800">Compression output note</summary>
-              <p className="mt-2 leading-6">Ye real compression page images ko optimized JPG mein convert karta hai. File size kam hota hai, lekin output visual PDF hota hai aur original searchable text preserve nahi hota.</p>
+              <p className="mt-2 leading-6">Compression converts page images to optimized JPGs. It can reduce file size, but the result is a visual PDF and does not preserve the original searchable text.</p>
             </details>
           </>}
-          {activeTool === "unlock" && <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">Unlock copy pages ko high-quality visual PDF mein recreate karti hai. Password zaroori hai aur searchable text preserve nahi hota.</p>}
+          {activeTool === "unlock" && <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">The unlock copy recreates pages as a high-quality visual PDF. A password is required, and searchable text is not preserved.</p>}
 
           {error && <p role="alert" className="mt-5 rounded-xl bg-red-50 p-4 text-sm font-medium text-red-800">{error}</p>}
           {status && <p role="status" className="mt-5 rounded-xl bg-emerald-50 p-4 text-sm font-medium text-emerald-800">{status}</p>}
           <button type="button" onClick={runTool} disabled={isWorking} className="mt-7 w-full rounded-xl bg-blue-600 px-5 py-3.5 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-wait disabled:bg-blue-400">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button>
-          <p className="mt-4 text-center text-xs leading-5 text-slate-500">Files browser mein locally process hoti hain. OCR language pack first use par download ho sakta hai.</p>
+          <p className="mt-4 text-center text-xs leading-5 text-slate-500">Files are processed locally in your browser. The OCR language pack may download on first use.</p>
         </section>
       </section>
     </main>

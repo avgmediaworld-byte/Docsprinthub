@@ -11,7 +11,7 @@ type DownloadImageOptions = {
 async function capturePage(page: HTMLElement): Promise<Blob> {
   await document.fonts.ready;
 
-  // Browser ko ek frame complete render karne do
+  // Allow the browser to finish one render frame.
   await new Promise<void>((resolve) =>
     requestAnimationFrame(() => resolve())
   );

@@ -1,4 +1,6 @@
 import Link from "next/link";
+import Image from "next/image";
+import { LanguageSelector } from "./components/LanguageProvider";
 export default function Home() {
     const tools = [
     {
@@ -40,7 +42,7 @@ export default function Home() {
       <nav className="flex items-center px-8 py-3 border-b border-gray-200 bg-white">
 
       <div className="flex items-center gap-1">
-        <span className="text-2xl">📄</span>
+        <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 rounded-lg" priority />
         <h1 className="text-4xl font-bold tracking-tight">
          DocSprint<span className="text-blue-600">Hub</span>
         </h1>
@@ -164,14 +166,17 @@ export default function Home() {
     <div className="grid md:grid-cols-3 gap-30">
 
       {/* Brand */}
-      <div>
-        <h3 className="text-3xl font-bold">
-          DocSprint<span className="text-blue-400">Hub</span>
-        </h3>
+      <div className="flex h-full flex-col">
+        <div>
+          <h3 className="text-3xl font-bold">
+            DocSprint<span className="text-blue-400">Hub</span>
+          </h3>
 
-        <p className="mt-3 text-gray-400 text-base">
-         Your Complete Document Hub
-          </p>
+          <p className="mt-3 text-gray-400 text-base">
+           Your Complete Document Hub
+            </p>
+        </div>
+        <div className="mt-auto pt-6 md:pt-0"><LanguageSelector /></div>
       </div>
 
       {/* Tools */}
@@ -200,8 +205,8 @@ export default function Home() {
 
     </div>
 
-    <div className="border-t border-slate-700 mt-8 pt-6 text-center">
-      <p className="text-gray-100 text-sm">
+    <div className="border-t border-slate-700 mt-4 pt-6">
+      <p className="text-center text-gray-100 text-sm">
         © {new Date().getFullYear()} DocSprintHub. All Rights Reserved.
       </p>
     </div>
