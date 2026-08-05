@@ -42,7 +42,7 @@ export default function Home() {
       <nav className="flex items-center px-8 py-3 border-b border-gray-200 bg-white">
 
       <div className="flex items-center gap-1">
-        <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 rounded-lg" priority />
+        <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
         <h1 className="text-4xl font-bold tracking-tight">
          DocSprint<span className="text-blue-600">Hub</span>
         </h1>
@@ -84,7 +84,7 @@ export default function Home() {
           </Link>
 
         <Link href="/resume-builder">
-          <button className="bg-blue-600 text-white font-semibold px-6 py-4 rounded-xl shadow-md hover:bg-blue-700 hover:shadow-lg transition duration-300">
+          <button className="bg-blue-600 text-white font-semibold px-6 py-3 rounded-xl shadow-md hover:bg-blue-700 hover:shadow-lg transition duration-300">
             Resume Builder
           </button>
         </Link>

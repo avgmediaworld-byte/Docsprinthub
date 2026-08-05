@@ -596,15 +596,15 @@ export default function PdfToolsPage() {
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-          <div className="flex items-center gap-5"><LanguageSelector variant="light" /><Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 rounded-lg" priority />DocSprint<span className="text-blue-600">Hub</span></Link></div>
+          <div className="flex items-center gap-5"><LanguageSelector variant="light" /><Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />DocSprint<span className="text-blue-600">Hub</span></Link></div>
           <Link href="/resume-builder" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 sm:px-5">Resume Builder</Link>
         </div>
       </header>
 
-      <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-7 text-center sm:px-8 sm:py-9">
+      <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-7 text-center sm:px-4 sm:py-4">
         <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p>
         <h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">PDF Tools</h1>
-        <p className="mx-auto mt-3 max-w-3xl text-base leading-7 text-slate-600 sm:text-lg">Merge, convert, organize, protect, and edit PDF files directly in your browser.</p>
+        <p className="mx-auto mt-3 max-w-3xl font-semibold text-base leading-7 text-slate-600 sm:text-lg">Merge, Convert, Organize, Protect & Edit PDF files Directly in Your Browser.</p>
       </section>
 
       <nav aria-label="PDF tool menu" className="border-b border-slate-200 bg-white shadow-sm">
