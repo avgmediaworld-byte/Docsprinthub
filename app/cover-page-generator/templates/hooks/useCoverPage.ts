@@ -4,6 +4,7 @@ import type { ChangeEvent, RefObject } from "react";
 import { useRef, useState } from "react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
+import { trackDownload } from "@/app/lib/analytics/client";
 
 export type TemplateMode = "academic" | "modern" | "minimal";
 
@@ -149,6 +150,7 @@ export default function useCoverPage(initialTemplateId = ""): UseCoverPageState 
         pdf.setProperties({ title: title || "Cover Page", author: "DocSprintHub", subject: "A4 Cover Page" });
         pdf.save("cover-page-a4.pdf");
       }
+      trackDownload("/cover-page-generator", "cover_page_generator", format, selectedTemplateId || undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The file could not be exported.");
     } finally {

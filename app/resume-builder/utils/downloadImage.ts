@@ -1,6 +1,7 @@
 import { toJpeg } from "html-to-image";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+import { trackDownload } from "@/app/lib/analytics/client";
 
 type DownloadImageOptions = {
   filename?: string;
@@ -60,6 +61,7 @@ export async function downloadResumeImage({
       const blob = await capturePage(pages[0]);
 
       saveAs(blob, `${filename}.jpg`);
+      trackDownload("/resume-builder", "resume_builder", "jpg");
 
       return;
     }
@@ -84,6 +86,7 @@ export async function downloadResumeImage({
     });
 
     saveAs(zipBlob, `${filename}-Images.zip`);
+    trackDownload("/resume-builder", "resume_builder", "zip");
   } catch (err) {
     console.error(err);
 

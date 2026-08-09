@@ -5,6 +5,7 @@ import Image from "next/image";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
 import { degrees, PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
+import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
 
 type Tool =
   | "merge"
@@ -236,6 +237,8 @@ function downloadBlob(blob: Blob, fileName: string) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+  const format = blob.type.includes("pdf") ? "pdf" : blob.type.includes("zip") ? "zip" : blob.type.includes("wordprocessingml") ? "docx" : blob.type.includes("spreadsheetml") ? "xlsx" : blob.type.includes("text/plain") ? "txt" : "file";
+  window.dispatchEvent(new CustomEvent("dsh:pdf-download", { detail: { format } }));
   window.setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
@@ -622,8 +625,18 @@ export default function PdfToolsPage() {
     editablePdfPages.forEach((page) => URL.revokeObjectURL(page.imageUrl));
   }, [editablePdfPages]);
 
+  useEffect(() => {
+    const reportDownload = (event: Event) => {
+      const format = event instanceof CustomEvent && typeof event.detail?.format === "string" ? event.detail.format : "file";
+      trackDownload("/pdf-tools", "pdf_tools", format, undefined, activeTool);
+    };
+    window.addEventListener("dsh:pdf-download", reportDownload);
+    return () => window.removeEventListener("dsh:pdf-download", reportDownload);
+  }, [activeTool]);
+
   function selectTool(tool: Tool) {
     if (tool === activeTool) return;
+    trackToolSelection("/pdf-tools", "pdf_tools", tool);
     setActiveTool(tool);
     if (tool === "resizeDecrease") setResizePercentage(75);
     if (tool === "resizeIncrease") setResizePercentage(125);

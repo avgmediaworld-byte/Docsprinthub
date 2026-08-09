@@ -12,6 +12,7 @@ import {
 
 import TemplateCard from "./TemplateCard";
 import { ResumeData } from "../types/resume";
+import { trackTemplateSelection } from "@/app/lib/analytics/client";
 
 
 type TemplateType = "biodata" | "fresher" | "classic" | "modern";
@@ -114,12 +115,13 @@ export default function TemplateSelector({
               key={template.id}
               template={template}
               selected={data.template === template.id}
-              onClick={() =>
+              onClick={() => {
                 setData((prev) => ({
                   ...prev,
                   template: template.id,
-                }))
-              }
+                }));
+                trackTemplateSelection("/resume-builder", "resume_builder", template.id);
+              }}
             />
           ))}
 

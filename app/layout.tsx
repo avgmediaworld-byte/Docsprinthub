@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import LanguageProvider from "./components/LanguageProvider";
+import { AnalyticsTracker } from "./lib/analytics/client";
 
 export const metadata: Metadata = {
   title: "DocSprintHub",
@@ -14,7 +15,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full flex flex-col"><LanguageProvider>{children}</LanguageProvider></body>
+      <body className="min-h-full flex flex-col"><LanguageProvider><AnalyticsTracker />{children}</LanguageProvider></body>
     </html>
   );
 }

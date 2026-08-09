@@ -5,6 +5,7 @@ import TemplateCard from "./TemplateCard";
 import { galleryController } from "../gallery";
 import SearchBar from "./SearchBar";
 import CategoryTabs, { type TemplateCategory } from "./CategoryTabs";
+import { trackCategorySelection, trackTemplateSelection } from "@/app/lib/analytics/client";
 
 interface TemplateGalleryProps {
   selectedTemplateId: string;
@@ -16,6 +17,16 @@ export default function TemplateGallery({ selectedTemplateId, onSelectTemplate }
   const [category, setCategory] = useState<TemplateCategory>("all");
   const templates = useMemo(() => galleryController.filterTemplates({ search, category }), [search, category]);
 
+  function selectCategory(nextCategory: TemplateCategory) {
+    setCategory(nextCategory);
+    if (nextCategory !== "all") trackCategorySelection("/cover-page-generator", "cover_page_generator", nextCategory);
+  }
+
+  function selectTemplate(templateId: string) {
+    trackTemplateSelection("/cover-page-generator", "cover_page_generator", templateId);
+    onSelectTemplate(templateId);
+  }
+
   return (
     <section aria-labelledby="template-gallery-heading">
       <h2 id="template-gallery-heading" className="sr-only">Template gallery</h2>
@@ -25,7 +36,7 @@ export default function TemplateGallery({ selectedTemplateId, onSelectTemplate }
           <SearchBar value={search} onChange={setSearch} placeholder="Search templates..." />
         </div>
         <div style={{ flex: "1 1 760px" }}>
-          <CategoryTabs selectedCategory={category} onCategoryChange={setCategory} />
+          <CategoryTabs selectedCategory={category} onCategoryChange={selectCategory} />
         </div>
       </div>
 
@@ -37,7 +48,7 @@ export default function TemplateGallery({ selectedTemplateId, onSelectTemplate }
           rowGap: "2rem",
         }}
       >
-        <button type="button" onClick={() => onSelectTemplate("blank-cover")} className="group text-left outline-none transition hover:-translate-y-1 focus-visible:ring-4 focus-visible:ring-blue-200">
+        <button type="button" onClick={() => selectTemplate("blank-cover")} className="group text-left outline-none transition hover:-translate-y-1 focus-visible:ring-4 focus-visible:ring-blue-200">
           <div className={`flex items-center justify-center rounded-2xl border bg-slate-50 transition ${selectedTemplateId === "blank-cover" ? "border-blue-600 bg-blue-50 shadow-[0_12px_30px_rgba(37,99,235,0.18)] ring-2 ring-inset ring-blue-600" : "border-slate-200 group-hover:border-slate-300 group-hover:bg-white group-hover:shadow-lg"}`} style={{ aspectRatio: "210 / 297" }}>
             <div className="text-center text-slate-900"><span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-slate-300 text-3xl font-light leading-none transition group-hover:border-blue-500 group-hover:text-blue-700">+</span><p className="mt-4 text-sm font-semibold">Create a blank Cover Page</p></div>
           </div>
@@ -47,7 +58,7 @@ export default function TemplateGallery({ selectedTemplateId, onSelectTemplate }
         {templates.length === 0 ? (
           <div className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white px-8 py-20 text-center"><h3 className="text-xl font-bold text-slate-700">No templates found</h3><p className="mt-2 text-slate-500">Try another keyword or category.</p></div>
         ) : templates.map((template) => (
-          <TemplateCard key={template.id} template={template} selected={selectedTemplateId === template.id} onSelect={() => onSelectTemplate(template.id)} />
+          <TemplateCard key={template.id} template={template} selected={selectedTemplateId === template.id} onSelect={() => selectTemplate(template.id)} />
         ))}
       </div>
     </section>

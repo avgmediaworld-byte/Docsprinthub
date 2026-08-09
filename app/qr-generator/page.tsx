@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import * as QRCode from "qrcode";
+import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
 
 type QrKind = "url" | "text" | "email" | "phone" | "sms" | "whatsapp" | "wifi" | "contact";
 type FormState = Record<string, string>;
@@ -100,6 +101,7 @@ export default function QrGeneratorPage() {
     setFields(defaults[nextKind]);
     setError("");
     setNotice("");
+    trackToolSelection("/qr-generator", "qr_generator", nextKind);
   }
 
   function handleLogo(event: ChangeEvent<HTMLInputElement>) {
@@ -161,6 +163,7 @@ export default function QrGeneratorPage() {
     if (!content || !preview) return setError("Please fill in the QR content first.");
     const blob = await (await fetch(preview)).blob();
     downloadBlob(blob, "docsprinthub-qr.png");
+    trackDownload("/qr-generator", "qr_generator", "png");
     setNotice("Your PNG download has started.");
   }
 
@@ -168,6 +171,7 @@ export default function QrGeneratorPage() {
     if (!content) return setError("Please fill in the QR content first.");
     const svg = await QRCode.toString(content, { type: "svg", width: size, margin, errorCorrectionLevel: correction, color: { dark: foreground, light: background } });
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), "docsprinthub-qr.svg");
+    trackDownload("/qr-generator", "qr_generator", "svg");
     setNotice(logo ? "Your SVG download has started. Uploaded logos are not included in SVG files." : "Your SVG download has started.");
   }
 

@@ -2,6 +2,7 @@
 
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
+import { trackDownload } from "@/app/lib/analytics/client";
 
 type DownloadPDFOptions = {
   filename?: string;
@@ -142,6 +143,7 @@ export async function downloadResumePDF({
     });
 
     pdf.save(filename);
+    trackDownload("/resume-builder", "resume_builder", "pdf");
   } finally {
     afterDownload?.();
   }
