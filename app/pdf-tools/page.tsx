@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
+import jsPDF from "jspdf";
 import { degrees, PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
 import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
 
@@ -16,6 +17,10 @@ type Tool =
   | "rotate"
   | "pdfToImage"
   | "imageToPdf"
+  | "wordToPdf"
+  | "powerpointToPdf"
+  | "excelToPdf"
+  | "pdfToPowerpoint"
   | "watermark"
   | "pageNumbers"
   | "crop"
@@ -68,6 +73,10 @@ const toolOptions: ToolOption[] = [
   { id: "rotate", title: "Rotate pages", description: "Turn selected pages clockwise." },
   { id: "pdfToImage", title: "PDF to JPG / PNG", description: "Convert PDF pages into image files." },
   { id: "imageToPdf", title: "JPG / PNG to PDF", description: "Create a PDF from photos or images." },
+  { id: "wordToPdf", title: "Word to PDF", description: "Convert a DOCX document to a readable PDF." },
+  { id: "powerpointToPdf", title: "PowerPoint to PDF", description: "Convert PPTX slide text to a PDF." },
+  { id: "excelToPdf", title: "Excel to PDF", description: "Convert XLSX or XLS workbook data to a PDF." },
+  { id: "pdfToPowerpoint", title: "PDF to PowerPoint", description: "Convert every PDF page into a PowerPoint slide." },
   { id: "watermark", title: "Add watermark", description: "Place watermark text on selected pages." },
   { id: "pageNumbers", title: "Add page numbers", description: "Add page numbering at the bottom." },
   { id: "crop", title: "Crop margins", description: "Trim equal margins from every selected page." },
@@ -83,8 +92,11 @@ const toolOptions: ToolOption[] = [
   { id: "ocr", title: "OCR scanned file", description: "Read text from a scanned PDF, JPG or PNG." },
 ];
 
+const convertToPdfTools: Tool[] = ["imageToPdf", "wordToPdf", "powerpointToPdf", "excelToPdf"];
+const convertFromPdfTools: Tool[] = ["pdfToImage", "word", "excel", "pdfToPowerpoint"];
+
 const toolMenus: Array<{ id: ToolMenu; label: string; tools: Tool[] }> = [
-  { id: "convert", label: "Convert", tools: ["pdfToImage", "imageToPdf", "word", "excel", "ocr"] },
+  { id: "convert", label: "Convert", tools: [] },
   { id: "organize", label: "Organize", tools: ["extract", "delete", "reorder", "rotate", "crop"] },
   { id: "edit", label: "Edit PDF", tools: ["watermark", "pageNumbers", "textEdit", "metadata"] },
   { id: "security", label: "Protect", tools: ["protect", "unlock"] },
@@ -484,6 +496,131 @@ function matchingStandardFont(run: EditableTextRun) {
   return StandardFonts.Helvetica;
 }
 
+type TextPdfPage = { title: string; paragraphs: string[] };
+
+function xmlParagraphs(xml: string) {
+  const document = new DOMParser().parseFromString(xml, "application/xml");
+  if (document.querySelector("parsererror")) throw new Error("The Office document could not be read.");
+
+  const paragraphs = Array.from(document.getElementsByTagNameNS("*", "p"));
+  return paragraphs
+    .map((paragraph) => Array.from(paragraph.getElementsByTagNameNS("*", "t")).map((node) => node.textContent ?? "").join("").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+async function officeArchive(file: File) {
+  try {
+    return await JSZip.loadAsync(await file.arrayBuffer());
+  } catch {
+    throw new Error("This file could not be opened. Use a modern Office file format.");
+  }
+}
+
+async function docxPages(file: File): Promise<TextPdfPage[]> {
+  const archive = await officeArchive(file);
+  const documentXml = archive.file("word/document.xml");
+  if (!documentXml) throw new Error("Use a .docx Word document.");
+  const paragraphs = xmlParagraphs(await documentXml.async("text"));
+  if (!paragraphs.length) throw new Error("No readable text was found in this Word document.");
+  return [{ title: file.name.replace(/\.docx$/i, ""), paragraphs }];
+}
+
+async function powerpointPages(file: File): Promise<TextPdfPage[]> {
+  const archive = await officeArchive(file);
+  const slideFiles = Object.keys(archive.files)
+    .filter((path) => /^ppt\/slides\/slide\d+\.xml$/i.test(path))
+    .sort((first, second) => Number(first.match(/slide(\d+)\.xml/i)?.[1]) - Number(second.match(/slide(\d+)\.xml/i)?.[1]));
+  if (!slideFiles.length) throw new Error("Use a .pptx PowerPoint presentation.");
+
+  const pages = await Promise.all(slideFiles.map(async (path, index) => ({
+    title: `Slide ${index + 1}`,
+    paragraphs: xmlParagraphs(await archive.files[path].async("text")),
+  })));
+  if (!pages.some((page) => page.paragraphs.length)) throw new Error("No readable slide text was found in this presentation.");
+  return pages;
+}
+
+async function excelPages(file: File): Promise<TextPdfPage[]> {
+  const XLSX = await import("xlsx");
+  let workbook: ReturnType<typeof XLSX.read>;
+  try {
+    workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  } catch {
+    throw new Error("This spreadsheet could not be read. Use an .xlsx or .xls file.");
+  }
+
+  const pages = workbook.SheetNames.map((sheetName) => {
+    const rows = XLSX.utils.sheet_to_json<string[]>(workbook.Sheets[sheetName], { header: 1, defval: "" });
+    return {
+      title: sheetName,
+      paragraphs: rows.map((row) => row.map((cell) => String(cell).trim()).join(" | ").replace(/(?: \| )+$/g, "")).filter(Boolean),
+    };
+  });
+  if (!pages.some((page) => page.paragraphs.length)) throw new Error("No readable cells were found in this spreadsheet.");
+  return pages;
+}
+
+function downloadTextPdf(pages: TextPdfPage[], fileName: string, orientation: "portrait" | "landscape" = "portrait") {
+  const pdf = new jsPDF({ orientation, unit: "pt", format: "a4", compress: true });
+  const margin = 42;
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const lineHeight = 16;
+  let isFirstPage = true;
+
+  for (const page of pages) {
+    if (!isFirstPage) pdf.addPage();
+    isFirstPage = false;
+    let y = margin;
+    const drawTitle = (continued = false) => {
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(continued ? `${page.title} (continued)` : page.title, margin, y);
+      y += 28;
+      pdf.setDrawColor(191, 219, 254);
+      pdf.line(margin, y - 10, pageWidth - margin, y - 10);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10.5);
+    };
+
+    drawTitle();
+    for (const paragraph of page.paragraphs) {
+      const lines = pdf.splitTextToSize(paragraph, pageWidth - margin * 2) as string[];
+      if (y + lines.length * lineHeight > pageHeight - margin) {
+        pdf.addPage();
+        y = margin;
+        drawTitle(true);
+      }
+      pdf.text(lines, margin, y);
+      y += lines.length * lineHeight + 7;
+    }
+  }
+
+  downloadBlob(pdf.output("blob"), fileName);
+}
+
+function blobDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(new Error("The slide image could not be prepared."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function ProgressMeter({ title, message, progress }: { title: string; message: string; progress: number }) {
+  const displayedProgress = Math.round(Math.max(0, Math.min(100, progress)));
+  return <div className="w-full rounded-xl border border-blue-200 bg-white p-4 text-left shadow-sm">
+    <div className="flex items-center justify-between gap-3"><p className="text-sm font-bold text-blue-950">{title}</p><span className="shrink-0 text-xs font-bold text-blue-700">Progress: {displayedProgress}%</span></div>
+    <div role="progressbar" aria-label={title} aria-valuemin={0} aria-valuemax={100} aria-valuenow={displayedProgress} className="mt-3 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div>
+    <p className="mt-2 text-xs leading-5 text-slate-600">{message}</p>
+  </div>;
+}
+
+function yieldToBrowser() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 export default function PdfToolsPage() {
   const [activeTool, setActiveTool] = useState<Tool>("merge");
   const [openMenu, setOpenMenu] = useState<ToolMenu | null>(null);
@@ -508,14 +645,17 @@ export default function PdfToolsPage() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [isWorking, setIsWorking] = useState(false);
+  const [isPreparingFiles, setIsPreparingFiles] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [draggedFileIndex, setDraggedFileIndex] = useState<number | null>(null);
   const externalDragDepth = useRef(0);
+  const toolMenuRef = useRef<HTMLElement | null>(null);
   const workingEditorPdfBytes = useRef<Uint8Array | null>(null);
   const editorPageRefs = useRef<Record<number, HTMLElement | null>>({});
 
   const activeDetails = toolOptions.find((tool) => tool.id === activeTool) ?? toolOptions[0];
-  const usesConvertLayout = ["pdfToImage", "imageToPdf", "word", "excel", "ocr"].includes(activeTool);
+  const usesConvertLayout = ["pdfToImage", "imageToPdf", "word", "excel", "ocr", "wordToPdf", "excelToPdf", "powerpointToPdf", "pdfToPowerpoint"].includes(activeTool);
   const usesResizeLayout = activeTool === "resizeDecrease" || activeTool === "resizeIncrease";
   const usesLargeUploadPanel = activeTool === "merge" || activeTool === "split" || activeTool === "optimize" || usesConvertLayout || usesResizeLayout;
   const usesTallActionSidebar = activeTool === "split" || activeTool === "optimize";
@@ -553,6 +693,11 @@ export default function PdfToolsPage() {
     if (activeTool === "textEdit") return;
     let cancelled = false;
 
+    if (!files.length) {
+      setIsPreparingFiles(false);
+      return;
+    }
+
     Promise.all(files.map(async (file) => {
       try {
         const preview = file.type.startsWith("image/") ? await imageDataUrl(file) : await renderPdfThumbnail(file);
@@ -561,13 +706,27 @@ export default function PdfToolsPage() {
         return [fileKey(file), ""] as const;
       }
     })).then((items) => {
-      if (!cancelled) setThumbnails(Object.fromEntries(items));
+      if (!cancelled) {
+        setThumbnails(Object.fromEntries(items));
+        setIsPreparingFiles(false);
+      }
     });
 
     return () => {
       cancelled = true;
     };
   }, [activeTool, files]);
+
+  useEffect(() => {
+    if (!isPreparingFiles && !isWorking) return;
+
+    const progressLimit = 99;
+    const timer = window.setInterval(() => {
+      setProgressPercent((current) => current >= progressLimit ? current : Math.min(progressLimit, current + (progressLimit - current) * 0.018));
+    }, 120);
+
+    return () => window.clearInterval(timer);
+  }, [isPreparingFiles, isWorking]);
 
   useEffect(() => {
     if (activeTool !== "metadata" || !files[0]) return;
@@ -610,7 +769,10 @@ export default function PdfToolsPage() {
         if (!cancelled) setError(caughtError instanceof Error ? caughtError.message : "The PDF text could not be read.");
       } finally {
         if (cancelled) pages.forEach((page) => URL.revokeObjectURL(page.imageUrl));
-        if (!cancelled) setIsTextEditorLoading(false);
+        if (!cancelled) {
+          setIsTextEditorLoading(false);
+          setIsPreparingFiles(false);
+        }
       }
     }
 
@@ -634,6 +796,29 @@ export default function PdfToolsPage() {
     return () => window.removeEventListener("dsh:pdf-download", reportDownload);
   }, [activeTool]);
 
+  useEffect(() => {
+    if (!openMenu) return;
+
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (toolMenuRef.current?.contains(event.target as Node)) return;
+      setOpenMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenMenu(null);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openMenu]);
+
+  function toggleMenu(menu: ToolMenu) {
+    setOpenMenu((current) => current === menu ? null : menu);
+  }
+
   function selectTool(tool: Tool) {
     if (tool === activeTool) return;
     trackToolSelection("/pdf-tools", "pdf_tools", tool);
@@ -649,6 +834,8 @@ export default function PdfToolsPage() {
     setSelectedTextRunId(null);
     setTextEditorQuery("");
     setIsTextEditorLoading(false);
+    setIsPreparingFiles(false);
+    setProgressPercent(0);
     workingEditorPdfBytes.current = null;
     externalDragDepth.current = 0;
     setIsDragging(false);
@@ -679,7 +866,14 @@ export default function PdfToolsPage() {
     setEditablePdfPages([]);
     setSelectedTextRunId(null);
     setIsTextEditorLoading(false);
+    setIsPreparingFiles(false);
     workingEditorPdfBytes.current = null;
+  }
+
+  function completeSuccessfulDownload(message: string) {
+    setProgressPercent(100);
+    setStatus(message);
+    clearSelectedFiles();
   }
 
   function removeFile(fileIndex: number) {
@@ -689,6 +883,7 @@ export default function PdfToolsPage() {
       setEditablePdfPages([]);
       setSelectedTextRunId(null);
       setIsTextEditorLoading(false);
+      setIsPreparingFiles(false);
       workingEditorPdfBytes.current = null;
     }
   }
@@ -696,13 +891,18 @@ export default function PdfToolsPage() {
   function addFiles(added: File[]) {
     const isValid = (file: File) => {
       if (isImageInput) return ["image/jpeg", "image/png"].includes(file.type);
+      if (activeTool === "wordToPdf") return /\.docx$/i.test(file.name);
+      if (activeTool === "excelToPdf") return /\.(xlsx|xls)$/i.test(file.name);
+      if (activeTool === "powerpointToPdf") return /\.pptx$/i.test(file.name);
       if (acceptsPdfOrImage) return file.type === "application/pdf" || ["image/jpeg", "image/png"].includes(file.type) || /\.(pdf|png|jpe?g)$/i.test(file.name);
       return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     };
     const invalid = added.find((file) => !isValid(file));
     if (invalid) {
-      setError(isImageInput ? "Please select JPG or PNG images only." : "Please select a valid PDF file.");
+      setError(isImageInput ? "Please select JPG or PNG images only." : activeTool === "wordToPdf" ? "Please select a DOCX file." : activeTool === "excelToPdf" ? "Please select an XLSX or XLS file." : activeTool === "powerpointToPdf" ? "Please select a PPTX file." : "Please select a valid PDF file.");
     } else if (added.length) {
+      setIsPreparingFiles(true);
+      setProgressPercent(5);
       if (activeTool === "textEdit") {
         setIsTextEditorLoading(true);
         setEditableTextRuns([]);
@@ -760,6 +960,8 @@ export default function PdfToolsPage() {
     if (activeTool === "textEdit" && isTextEditorLoading) return setError("Please wait for the PDF text editor to finish loading.");
 
     setIsWorking(true);
+    setProgressPercent(5);
+    await yieldToBrowser();
     try {
       if (activeTool === "merge") {
         const merged = await PDFDocument.create();
@@ -769,7 +971,7 @@ export default function PdfToolsPage() {
           pages.forEach((page) => merged.addPage(page));
         }
         downloadPdf(await merged.save({ useObjectStreams: true }), "merged-document.pdf");
-        setStatus(`${files.length} PDFs were merged. Your download has started.`);
+        completeSuccessfulDownload(`${files.length} PDFs were merged. Your download has started.`);
         return;
       }
 
@@ -785,11 +987,53 @@ export default function PdfToolsPage() {
           page.drawImage(image, { x: (page.getWidth() - width) / 2, y: (page.getHeight() - height) / 2, width, height });
         }
         downloadPdf(await pdf.save({ useObjectStreams: true }), "images-to-pdf.pdf");
-        setStatus("An A4 PDF was created from the images. Your download has started.");
+        completeSuccessfulDownload("An A4 PDF was created from the images. Your download has started.");
         return;
       }
 
       const sourceFile = files[0];
+
+      if (activeTool === "wordToPdf") {
+        downloadTextPdf(await docxPages(sourceFile), outputName(sourceFile.name, "converted"));
+        completeSuccessfulDownload("Your Word document was converted to PDF. The download has started.");
+        return;
+      }
+
+      if (activeTool === "excelToPdf") {
+        downloadTextPdf(await excelPages(sourceFile), outputName(sourceFile.name, "converted"), "landscape");
+        completeSuccessfulDownload("Your spreadsheet was converted to PDF. The download has started.");
+        return;
+      }
+
+      if (activeTool === "powerpointToPdf") {
+        downloadTextPdf(await powerpointPages(sourceFile), outputName(sourceFile.name, "converted"), "landscape");
+        completeSuccessfulDownload("Your PowerPoint slides were converted to PDF. The download has started.");
+        return;
+      }
+
+      if (activeTool === "pdfToPowerpoint") {
+        const { default: PptxGenJS } = await import("pptxgenjs");
+        const presentation = new PptxGenJS();
+        presentation.layout = "LAYOUT_WIDE";
+        presentation.author = "DocSprintHub";
+        presentation.subject = "PDF to PowerPoint conversion";
+        presentation.title = sourceFile.name.replace(/\.pdf$/i, "");
+        const pages = await renderPdfPages(sourceFile, "", "image/png", 1.5);
+        for (const page of pages) {
+          const slide = presentation.addSlide();
+          const ratio = page.width / page.height;
+          const slideWidth = 13.333;
+          const slideHeight = 7.5;
+          const width = Math.min(slideWidth, slideHeight * ratio);
+          const height = width / ratio;
+          slide.addImage({ data: await blobDataUrl(page.blob), x: (slideWidth - width) / 2, y: (slideHeight - height) / 2, w: width, h: height });
+        }
+        const output = await presentation.write({ outputType: "blob", compression: true });
+        if (!(output instanceof Blob)) throw new Error("The PowerPoint file could not be created.");
+        downloadBlob(output, outputName(sourceFile.name, "slides", "pptx"));
+        completeSuccessfulDownload("Your PDF pages were converted to PowerPoint slides. The download has started.");
+        return;
+      }
 
       if (activeTool === "pdfToImage") {
         const zip = new JSZip();
@@ -801,7 +1045,7 @@ export default function PdfToolsPage() {
           imageCount += pages.length;
         }
         downloadBlob(await zip.generateAsync({ type: "blob" }), files.length === 1 ? outputName(sourceFile.name, "images", "zip") : `converted-${imageFormat}-images.zip`);
-        setStatus(`${imageCount} images from ${files.length} PDFs are being downloaded as a ZIP file.`);
+        completeSuccessfulDownload(`${imageCount} images from ${files.length} PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
@@ -814,7 +1058,7 @@ export default function PdfToolsPage() {
           page.drawImage(image, { x: 0, y: 0, width: pageImage.width, height: pageImage.height });
         }
         downloadPdf(await unlocked.save({ useObjectStreams: true }), outputName(sourceFile.name, "unlocked"));
-        setStatus("A password-free visual copy is downloading. Searchable text is not preserved in this copy.");
+        completeSuccessfulDownload("A password-free visual copy is downloading. Searchable text is not preserved in this copy.");
         return;
       }
 
@@ -878,7 +1122,7 @@ export default function PdfToolsPage() {
         const refreshedPages = await renderEditablePdfPages(savedBytes);
         setEditablePdfPages(refreshedPages);
         setEditableTextRuns((current) => current.map((run) => ({ ...run, original: run.value })));
-        setStatus(`${changedRuns.length} text correction${changedRuns.length === 1 ? "" : "s"} was saved and removed from the change history.`);
+        completeSuccessfulDownload(`${changedRuns.length} text correction${changedRuns.length === 1 ? "" : "s"} was saved and removed from the change history.`);
         return;
       }
 
@@ -890,7 +1134,7 @@ export default function PdfToolsPage() {
           const children = textPages.flatMap((text, index) => [new Paragraph({ text: `Page ${index + 1}` }), new Paragraph({ text: text || " " })]);
           const wordDocument = new Document({ sections: [{ children }] });
           downloadBlob(await Packer.toBlob(wordDocument), outputName(sourceFile.name, "text", "docx"));
-          setStatus("PDF text was exported to a Word file. Your download has started.");
+          completeSuccessfulDownload("PDF text was exported to a Word file. Your download has started.");
         } else {
           const XLSX = await import("xlsx");
           const workbook = XLSX.utils.book_new();
@@ -898,7 +1142,7 @@ export default function PdfToolsPage() {
           XLSX.utils.book_append_sheet(workbook, sheet, "PDF text");
           const bytes = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
           downloadBlob(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), outputName(sourceFile.name, "text", "xlsx"));
-          setStatus("PDF text was exported to an Excel file. Your download has started.");
+          completeSuccessfulDownload("PDF text was exported to an Excel file. Your download has started.");
         }
         return;
       }
@@ -920,7 +1164,7 @@ export default function PdfToolsPage() {
             output.push(`--- Page ${index + 1} ---\n${result.data.text.trim()}`);
           }
           downloadBlob(new Blob([output.join("\n\n")], { type: "text/plain;charset=utf-8" }), outputName(sourceFile.name, "ocr", "txt"));
-          setStatus("OCR text is ready. Your download has started.");
+          completeSuccessfulDownload("OCR text is ready. Your download has started.");
         } finally {
           await worker.terminate();
         }
@@ -936,7 +1180,7 @@ export default function PdfToolsPage() {
           permissions: { printing: "highResolution", modifying: false, copying: false, annotating: false, fillingForms: true, contentAccessibility: true, documentAssembly: false },
         });
         downloadPdf(await protectedPdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "protected"));
-        setStatus("Your password-protected PDF is ready to download.");
+        completeSuccessfulDownload("Your password-protected PDF is ready to download.");
         return;
       }
 
@@ -956,7 +1200,7 @@ export default function PdfToolsPage() {
         }
         const compressedBytes = await compressedPdf.save({ useObjectStreams: true });
         downloadPdf(compressedBytes, outputName(sourceFile.name, "compressed"));
-        setStatus(`Compressed from ${formatBytes(sourceFile.size)} to ${formatBytes(compressedBytes.byteLength)} (${profile.label}). Your download has started.`);
+        completeSuccessfulDownload(`Compressed from ${formatBytes(sourceFile.size)} to ${formatBytes(compressedBytes.byteLength)} (${profile.label}). Your download has started.`);
         return;
       }
 
@@ -970,7 +1214,7 @@ export default function PdfToolsPage() {
         const scale = resizePercentage / 100;
         sourcePdf.getPages().forEach((page) => page.scale(scale, scale));
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, isDecrease ? "page-size-decreased" : "page-size-increased"));
-        setStatus(`Every page was resized to ${resizePercentage}% while keeping its content proportional. Your download has started.`);
+        completeSuccessfulDownload(`Every page was resized to ${resizePercentage}% while keeping its content proportional. Your download has started.`);
         return;
       }
 
@@ -983,14 +1227,14 @@ export default function PdfToolsPage() {
           zip.file(`page-${pageIndex + 1}.pdf`, await singlePagePdf.save({ useObjectStreams: true }));
         }
         downloadBlob(await zip.generateAsync({ type: "blob" }), outputName(sourceFile.name, "split", "zip"));
-        setStatus(`${pageIndexes.length} separate PDFs are being downloaded as a ZIP file.`);
+        completeSuccessfulDownload(`${pageIndexes.length} separate PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
       if (activeTool === "extract" || activeTool === "reorder") {
         const result = await selectedCopy(sourcePdf, pageIndexes);
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, activeTool === "extract" ? "selected-pages" : "reordered"));
-        setStatus(activeTool === "extract" ? "The PDF with the selected pages is ready." : "The page order was updated. Your download has started.");
+        completeSuccessfulDownload(activeTool === "extract" ? "The PDF with the selected pages is ready." : "The page order was updated. Your download has started.");
         return;
       }
 
@@ -1000,7 +1244,7 @@ export default function PdfToolsPage() {
         if (!remaining.length) throw new Error("You cannot delete every page. Keep at least one page.");
         const result = await selectedCopy(sourcePdf, remaining);
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, "pages-removed"));
-        setStatus("The selected pages were removed. Your download has started.");
+        completeSuccessfulDownload("The selected pages were removed. Your download has started.");
         return;
       }
 
@@ -1010,7 +1254,7 @@ export default function PdfToolsPage() {
           page.setRotation(degrees((page.getRotation().angle + rotation) % 360));
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "rotated"));
-        setStatus("The selected pages were rotated. Your download has started.");
+        completeSuccessfulDownload("The selected pages were rotated. Your download has started.");
         return;
       }
 
@@ -1024,7 +1268,7 @@ export default function PdfToolsPage() {
           page.drawText(watermark, { x: (page.getWidth() - textWidth) / 2, y: page.getHeight() / 2, size: fontSize, font, color: rgb(0.75, 0.08, 0.08), opacity: 0.28, rotate: degrees(35) });
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "watermarked"));
-        setStatus("The watermark was added. Your download has started.");
+        completeSuccessfulDownload("The watermark was added. Your download has started.");
         return;
       }
 
@@ -1037,7 +1281,7 @@ export default function PdfToolsPage() {
           page.drawText(text, { x: (page.getWidth() - font.widthOfTextAtSize(text, fontSize)) / 2, y: 16, size: fontSize, font, color: rgb(0.12, 0.12, 0.12) });
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "numbered"));
-        setStatus("Page numbers were added. Your download has started.");
+        completeSuccessfulDownload("Page numbers were added. Your download has started.");
         return;
       }
 
@@ -1051,7 +1295,7 @@ export default function PdfToolsPage() {
           page.setCropBox(cropMargin, cropMargin, width, height);
         });
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "cropped"));
-        setStatus("The margins were cropped. Your download has started.");
+        completeSuccessfulDownload("The margins were cropped. Your download has started.");
         return;
       }
 
@@ -1062,12 +1306,12 @@ export default function PdfToolsPage() {
         sourcePdf.setKeywords(metadata.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean));
         sourcePdf.setModificationDate(new Date());
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "metadata"));
-        setStatus("The PDF metadata was updated. Your download has started.");
+        completeSuccessfulDownload("The PDF metadata was updated. Your download has started.");
         return;
       }
 
       downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "optimized"));
-      setStatus("The PDF was optimized. The final size depends on its content.");
+      completeSuccessfulDownload("The PDF was optimized. The final size depends on its content.");
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : "The PDF could not be processed.";
       setError(message.toLowerCase().includes("password") || message.toLowerCase().includes("encrypted") ? "Use the correct password for this protected PDF." : message);
@@ -1076,25 +1320,27 @@ export default function PdfToolsPage() {
     }
   }
 
-  const accept = isImageInput ? "image/jpeg,image/png,.jpg,.jpeg,.png" : acceptsPdfOrImage ? "application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" : "application/pdf,.pdf";
-  const uploadLabel = isImageInput ? "Choose JPG or PNG images" : acceptsPdfOrImage ? "Choose a PDF, JPG, or PNG file" : activeTool === "merge" ? "Choose PDF files" : "Choose a PDF file";
+  const accept = isImageInput ? "image/jpeg,image/png,.jpg,.jpeg,.png" : activeTool === "wordToPdf" ? ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" : activeTool === "excelToPdf" ? ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" : activeTool === "powerpointToPdf" ? ".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" : acceptsPdfOrImage ? "application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" : "application/pdf,.pdf";
+  const uploadLabel = isImageInput ? "Choose JPG or PNG images" : activeTool === "wordToPdf" ? "Choose a DOCX file" : activeTool === "excelToPdf" ? "Choose an XLSX or XLS file" : activeTool === "powerpointToPdf" ? "Choose a PPTX file" : acceptsPdfOrImage ? "Choose a PDF, JPG, or PNG file" : activeTool === "merge" ? "Choose PDF files" : "Choose a PDF file";
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
-          <Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />DocSprint<span className="text-blue-600">Hub</span></Link>
-          <Link href="/resume-builder" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 sm:px-5">Resume Builder</Link>
+      <header className="border-b border-slate-300 bg-white">
+        <div className="flex items-center px-5 py-3 sm:px-8">
+          <Link href="/" className="inline-flex items-center gap-1">
+            <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
+            <span className="text-3xl font-bold tracking-tight sm:text-4xl">DocSprint<span className="text-blue-600">Hub</span></span>
+          </Link>
+          <span className="ml-auto text-base font-bold text-slate-800">PDF Tools</span>
         </div>
       </header>
 
       {!(activeTool === "textEdit" && files.length) && <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-7 text-center sm:px-4 sm:py-4">
-        <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p>
-        <h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">PDF Tools</h1>
+        <h1 className="text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">PDF Tools</h1>
         <p className="mx-auto mt-3 max-w-3xl font-semibold text-base leading-7 text-slate-600 sm:text-lg">Merge, Convert, Organize, Protect & Edit PDF files Directly in Your Browser.</p>
       </section>}
 
-      <nav aria-label="PDF tool menu" className="border-b border-slate-200 bg-white shadow-sm">
+      <nav ref={toolMenuRef} aria-label="PDF tool menu" className="border-b border-slate-200 bg-white shadow-sm">
         <div className={activeTool === "textEdit" && files.length ? "w-full px-4 py-3 sm:px-5" : "mx-auto max-w-7xl px-5 py-4 sm:px-8"}>
           <div className="flex flex-wrap gap-2" role="tablist" aria-label="Quick PDF tools">
             {(["merge", "split", "optimize"] as Tool[]).map((toolId) => {
@@ -1104,16 +1350,21 @@ export default function PdfToolsPage() {
             })}
             {toolMenus.map((menu) => (
               <div key={menu.id} className="relative">
-                <button type="button" aria-haspopup="menu" aria-expanded={openMenu === menu.id} onClick={() => setOpenMenu((current) => current === menu.id ? null : menu.id)} className={`rounded-lg px-4 py-2.5 text-sm font-bold transition ${openMenu === menu.id ? "bg-slate-800 text-white shadow-sm" : "bg-slate-100 text-slate-700 hover:bg-blue-50 hover:text-blue-700"}`}>
+                <button type="button" aria-haspopup="menu" aria-expanded={openMenu === menu.id} onPointerDown={(event) => { if (event.button === 0) toggleMenu(menu.id); }} onClick={(event) => { if (event.detail === 0) toggleMenu(menu.id); }} className={`rounded-lg px-4 py-2.5 text-sm font-bold transition ${openMenu === menu.id ? "bg-slate-800 text-white shadow-sm" : "bg-slate-100 text-slate-700 hover:bg-blue-50 hover:text-blue-700"}`}>
                   {menu.label} {openMenu === menu.id ? "▲" : "▼"}
                 </button>
-                {openMenu === menu.id && <div role="menu" aria-label={`${menu.label} tools`} className="absolute left-0 top-full z-20 mt-2 min-w-56 rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                {openMenu === menu.id && (menu.id === "convert" ? <div role="menu" aria-label="Convert tools" className="absolute left-0 top-full z-20 mt-2 w-[29rem] max-w-[calc(100vw-2.5rem)] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+                  <div className="grid grid-cols-2 divide-x divide-slate-200">
+                    <section className="p-1.5"><h3 className="mx-1 mb-1 rounded-md bg-blue-700 px-2.5 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">Convert to PDF</h3>{convertToPdfTools.map((toolId) => { const tool = toolOptions.find((option) => option.id === toolId); return tool ? <button key={tool.id} type="button" role="menuitem" onClick={() => selectTool(tool.id)} className={`block w-full rounded-lg px-3 py-1.5 text-left text-sm font-semibold transition ${activeTool === tool.id ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-100 hover:text-blue-700"}`}>{tool.title}</button> : null; })}</section>
+                    <section className="p-1.5"><h3 className="mx-1 mb-1 rounded-md bg-blue-700 px-2.5 py-1.5 text-xs font-extrabold uppercase tracking-wide text-white">Convert from PDF</h3>{convertFromPdfTools.map((toolId) => { const tool = toolOptions.find((option) => option.id === toolId); return tool ? <button key={tool.id} type="button" role="menuitem" onClick={() => selectTool(tool.id)} className={`block w-full rounded-lg px-3 py-1.5 text-left text-sm font-semibold transition ${activeTool === tool.id ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-100 hover:text-blue-700"}`}>{tool.title}</button> : null; })}</section>
+                  </div>
+                </div> : <div role="menu" aria-label={`${menu.label} tools`} className="absolute left-0 top-full z-20 mt-2 min-w-56 rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
                   {menu.tools.map((toolId) => {
                     const tool = toolOptions.find((option) => option.id === toolId);
                     if (!tool) return null;
                     return <button key={tool.id} type="button" role="menuitem" onClick={() => selectTool(tool.id)} className={`block w-full rounded-lg px-3 py-2.5 text-left text-sm font-semibold transition ${activeTool === tool.id ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-100 hover:text-slate-950"}`}>{tool.title}</button>;
                   })}
-                </div>}
+                </div>)}
               </div>
             ))}
           </div>
@@ -1130,6 +1381,7 @@ export default function PdfToolsPage() {
           {activeTool === "textEdit" && files.length ? <section className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 shadow-sm">
             <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-700">Editing locally</p><p className="mt-1 truncate font-bold text-slate-900" title={files[0].name}>{files[0].name}</p><p data-no-translate className="mt-1 text-xs text-slate-600">{editablePdfPages.length ? `${editablePdfPages.length} pages · ${formatBytes(files[0].size)}` : "Preparing PDF preview..."}</p></div>
             <div className="flex shrink-0 items-center gap-2"><label className="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700">Replace PDF<input className="sr-only" type="file" accept={accept} onChange={handleFiles} /></label><button type="button" onClick={clearSelectedFiles} className="rounded-lg px-3 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 hover:text-blue-900">Close</button></div>
+            {isPreparingFiles && <div className="basis-full"><ProgressMeter title="Preparing your PDF" message="Reading the selected file and preparing its local preview." progress={progressPercent} /></div>}
           </section> : <div
             onDragEnter={(event) => {
               if (!Array.from(event.dataTransfer.types).includes("Files")) return;
@@ -1210,6 +1462,7 @@ export default function PdfToolsPage() {
                 <p className="mt-4 text-center text-xs text-slate-500">{allowsMultiple ? "Drag cards with your mouse to set the merge order. You can also add new files by dragging them into this area." : "You can replace the file by dragging and dropping a new one into this area."}</p>
               </div>
             )}
+            {isPreparingFiles && <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-white/90 p-5 backdrop-blur-[1px]"><div className="w-full max-w-md"><ProgressMeter title="Preparing selected file" message="Reading your file and creating a local preview. Large files can take a moment." progress={progressPercent} /></div></div>}
           </div>}
 
           {needsPages && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : activeTool === "reorder" ? "New page order" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder={activeTool === "reorder" ? "e.g. 3, 1, 2" : "All pages (or e.g. 1, 3-5)"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Leave blank to select all pages.</span></label>}
@@ -1293,7 +1546,7 @@ export default function PdfToolsPage() {
                     {selectedTextRun ? <><p className="text-xs font-bold uppercase tracking-wide text-blue-800">Editing on page {selectedTextRun.pageIndex + 1}</p><p className="mt-1 text-sm leading-5 text-slate-600">Use the floating editor on the PDF itself. Font, size, text colour and background can be corrected there.</p><button type="button" onClick={() => setSelectedTextRunId(null)} className="mt-3 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50">Close editor</button></> : <p className="text-sm leading-6 text-slate-500">Click any text directly in the PDF. Its editor will open beside that line.</p>}
                   </div>
                   <div className="border-t border-slate-200 bg-slate-50 p-4"><div className="flex items-center justify-between gap-2"><p className="text-sm font-bold text-slate-800">Change history</p><span data-no-translate className="text-xs font-semibold text-slate-500">{textChangeCount} pending</span></div>{changedTextRuns.length ? <div className="mt-3 space-y-2">{changedTextRuns.map((run) => <article key={run.id} className="rounded-lg border border-blue-100 bg-white p-3"><div className="flex items-start justify-between gap-2"><button type="button" onClick={() => { setSelectedTextRunId(run.id); scrollToEditorPage(run.pageIndex); }} className="min-w-0 text-left text-sm font-semibold text-blue-800 hover:text-blue-950"><span className="block text-[11px] uppercase tracking-wide text-slate-500">Page {run.pageIndex + 1}</span><span className="block truncate text-slate-500 line-through">{run.original}</span><span className="block truncate text-slate-900">{run.value || "(removed)"}</span></button><button type="button" onClick={() => discardTextRunChange(run.id)} className="shrink-0 text-xs font-bold text-slate-500 hover:text-red-700">Remove</button></div></article>)}</div> : <p className="mt-2 text-sm leading-5 text-slate-500">No unsaved changes. Saved changes disappear from this list.</p>}</div>
-                  <div className="border-t border-slate-200 p-4">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || textChangeCount === 0} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Saving PDF..." : "Save PDF and download"}</button><p className="mt-2 text-center text-xs leading-5 text-slate-500">After save, the change history is cleared.</p></div>
+                  <div className="border-t border-slate-200 p-4">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Saving your PDF" message="Processing your changes securely in your browser. Download will start automatically." progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles || textChangeCount === 0} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Saving PDF..." : "Save PDF and download"}</button><p className="mt-2 text-center text-xs leading-5 text-slate-500">After save, the change history is cleared.</p></div>
                 </section>
               </aside>
             </div>}
@@ -1322,7 +1575,7 @@ export default function PdfToolsPage() {
                   <label className="mt-3 block"><span className="text-sm font-bold text-slate-800">Target page size (%)</span><input type="number" min={activeTool === "resizeDecrease" ? 1 : 101} max={activeTool === "resizeDecrease" ? 99 : 400} step="1" value={resizePercentage} onChange={(event) => setResizePercentage(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs leading-5 text-slate-500">{activeTool === "resizeDecrease" ? "Choose any custom size from 1% to 99% of the original page." : "Choose any custom size above 100% of the original page."}</span></label>
                 </section>}
               </div>
-              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">Files are processed locally in your browser.</p></div>
+              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Processing your file" message="Your result is being created securely in your browser. Download will start automatically." progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">Files are processed locally in your browser.</p></div>
             </aside>}
           </div>
         </section>

@@ -1,6 +1,6 @@
 "use client";
 
-import html2canvas from "html2canvas";
+import { toPng } from "html-to-image";
 import jsPDF from "jspdf";
 import { trackDownload } from "@/app/lib/analytics/client";
 
@@ -32,63 +32,27 @@ function getPages(): HTMLElement[] {
   ) as HTMLElement[];
 }
 
-async function captureA4Page(page: HTMLElement): Promise<HTMLCanvasElement> {
-  const exportSurface = document.createElement("div");
-  const pageClone = page.cloneNode(true) as HTMLElement;
+async function captureA4Page(page: HTMLElement): Promise<string> {
+  await waitForRender();
 
-  // html2canvas recreates the original flex container. On a narrow preview it
-  // can shrink the cloned page while retaining a larger canvas, which leaves a
-  // blank strip on the right and shifts content vertically. Capture an
-  // independent, fixed-size copy instead.
-  exportSurface.style.cssText = [
-    "position: fixed",
-    "left: -100000px",
-    "top: 0",
-    "width: 210mm",
-    "height: 297mm",
-    "overflow: hidden",
-    "pointer-events: none",
-  ].join(";");
-
-  pageClone.style.width = "210mm";
-  pageClone.style.minWidth = "210mm";
-  pageClone.style.maxWidth = "210mm";
-  pageClone.style.height = "297mm";
-  pageClone.style.minHeight = "297mm";
-  pageClone.style.maxHeight = "297mm";
-  pageClone.style.flex = "0 0 210mm";
-  pageClone.style.flexShrink = "0";
-  pageClone.style.margin = "0";
-
-  exportSurface.append(pageClone);
-  document.body.append(exportSurface);
-
-  try {
-    await waitForRender();
-
-    const width = pageClone.offsetWidth;
-    const height = pageClone.offsetHeight;
-
-    if (!width || !height) {
-      throw new Error("Resume page has no visible size.");
-    }
-
-    return await html2canvas(pageClone, {
-      scale: CAPTURE_SCALE,
-      width,
-      height,
-      windowWidth: width,
-      windowHeight: height,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: "#ffffff",
-      logging: false,
-      scrollX: 0,
-      scrollY: 0,
-    });
-  } finally {
-    exportSurface.remove();
+  if (!page.offsetWidth || !page.offsetHeight) {
+    throw new Error("Resume page has no visible size.");
   }
+
+  // Capture the exact element shown in the preview. This intentionally uses
+  // the same renderer as the working image export, avoiding an off-screen
+  // clone whose layout can differ from the visible A4 page.
+  return toPng(page, {
+    pixelRatio: CAPTURE_SCALE,
+    cacheBust: true,
+    backgroundColor: "#ffffff",
+    style: {
+      margin: "0",
+      padding: "0",
+      transform: "none",
+      overflow: "hidden",
+    },
+  });
 }
 
 export async function downloadResumePDF({
@@ -114,7 +78,7 @@ export async function downloadResumePDF({
     });
 
     for (const [index, page] of pages.entries()) {
-      const canvas = await captureA4Page(page);
+      const image = await captureA4Page(page);
 
       if (index > 0) {
         pdf.addPage("a4", "portrait");
@@ -124,7 +88,7 @@ export async function downloadResumePDF({
       // at exactly 210 x 297 mm prevents long pages from being scaled beyond
       // the printable area or creating an incorrectly sized PDF page.
       pdf.addImage(
-        canvas.toDataURL("image/png"),
+        image,
         "PNG",
         0,
         0,

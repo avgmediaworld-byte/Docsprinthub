@@ -2,7 +2,7 @@
 
 import type { ChangeEvent, RefObject } from "react";
 import { useRef, useState } from "react";
-import html2canvas from "html2canvas";
+import { toJpeg, toPng } from "html-to-image";
 import jsPDF from "jspdf";
 import { trackDownload } from "@/app/lib/analytics/client";
 
@@ -89,38 +89,30 @@ export default function useCoverPage(initialTemplateId = ""): UseCoverPageState 
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   }
 
-  async function captureA4(element: HTMLElement) {
-    const surface = document.createElement("div");
-    const clone = element.cloneNode(true) as HTMLElement;
-    surface.style.cssText = "position:fixed;left:-100000px;top:0;width:210mm;height:297mm;overflow:hidden;pointer-events:none;";
-    clone.style.width = "210mm";
-    clone.style.minWidth = "210mm";
-    clone.style.maxWidth = "210mm";
-    clone.style.height = "297mm";
-    clone.style.minHeight = "297mm";
-    clone.style.maxHeight = "297mm";
-    clone.style.margin = "0";
-    clone.style.transform = "none";
-    surface.append(clone);
-    document.body.append(surface);
+  async function captureA4(element: HTMLElement, format: "jpeg" | "png") {
+    await waitForRender();
 
-    try {
-      await waitForRender();
-      return await html2canvas(clone, {
-        scale: 2,
-        width: clone.offsetWidth,
-        height: clone.offsetHeight,
-        windowWidth: clone.offsetWidth,
-        windowHeight: clone.offsetHeight,
-        backgroundColor: "#ffffff",
-        useCORS: true,
-        logging: false,
-        scrollX: 0,
-        scrollY: 0,
-      });
-    } finally {
-      surface.remove();
+    if (!element.offsetWidth || !element.offsetHeight) {
+      throw new Error("Cover page has no visible size.");
     }
+
+    const options = {
+      pixelRatio: 2,
+      cacheBust: true,
+      backgroundColor: "#ffffff",
+      style: {
+        margin: "0",
+        padding: "0",
+        transform: "none",
+        overflow: "hidden",
+      },
+    };
+
+    // Export the visible A4 element directly so PDF, JPG, and print keep the
+    // same layout instead of reflowing an off-screen cloned page.
+    return format === "jpeg"
+      ? toJpeg(element, { ...options, quality: 0.95 })
+      : toPng(element, options);
   }
 
   function downloadBlob(blob: Blob, fileName: string) {
@@ -140,13 +132,14 @@ export default function useCoverPage(initialTemplateId = ""): UseCoverPageState 
     setError("");
 
     try {
-      const canvas = await captureA4(pageRef.current);
       if (format === "jpg") {
-        const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => (result ? resolve(result) : reject(new Error("The JPG could not be created."))), "image/jpeg", 0.95));
+        const image = await captureA4(pageRef.current, "jpeg");
+        const blob = await fetch(image).then((response) => response.blob());
         downloadBlob(blob, "cover-page-a4.jpg");
       } else {
+        const image = await captureA4(pageRef.current, "png");
         const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
-        pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, 210, 297, undefined, "FAST");
+        pdf.addImage(image, "PNG", 0, 0, 210, 297, undefined, "FAST");
         pdf.setProperties({ title: title || "Cover Page", author: "DocSprintHub", subject: "A4 Cover Page" });
         pdf.save("cover-page-a4.pdf");
       }

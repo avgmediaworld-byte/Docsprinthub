@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import ResumeForm from "./components/ResumeForm";
 import { ResumeData } from "./types/resume";
 import TemplateSelector from "./components/TemplateSelector";
@@ -194,18 +196,23 @@ const downloadPDF = async () => {
 };
 
   return (
-    <div className="min-h-screen bg-gray-100 py-10 px-4">
-      <div className="max-w-6xl mx-auto">
-        {step === "form" && (
-          <>
-            <h1 className="text-4xl font-bold text-center">
-              Resume Builder
-            </h1>
+    <main className="min-h-screen bg-gray-100 text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="flex w-full items-center justify-between px-5 py-4 sm:px-8">
+          <Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl">
+            <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
+            <span className="whitespace-nowrap">DocSprint<span className="text-blue-600">Hub</span></span>
+          </Link>
+          <span className="text-base font-bold text-slate-800">Resume Builder</span>
+        </div>
+      </header>
 
-            <p className="text-center text-gray-600 mt-2 mb-8">
+      <div className="px-4 py-10">
+      <div className="mx-auto max-w-6xl">
+        {step === "form" && (
+          <h3 className="mb-8 text-center text-xl font-medium text-gray-600">
               Create your professional resume in minutes.
-            </p>
-          </>
+          </h3>
         )}
 
       {step === "template" ? (
@@ -231,6 +238,7 @@ const downloadPDF = async () => {
       />
       )}
       </div>
-    </div>
+      </div>
+    </main>
   );
 }

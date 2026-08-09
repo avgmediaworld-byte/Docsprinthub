@@ -160,12 +160,17 @@ static createSection(
    * horizontal row, their summed heights can be larger than the section's
    * physical height; retaining that larger value is deliberate safety space.
    */
-  const fixedContentHeight = Math.max(
-    0,
-    measuredContentHeight - itemHeight,
-  );
+  const splittable = element.dataset.splittable === "true";
+  const fixedContentHeight = splittable
+    ? Math.max(0, measuredContentHeight - itemHeight)
+    : 0;
 
-  const contentHeight = itemHeight + fixedContentHeight;
+  // An unsplittable section (such as the declaration) is rendered as one
+  // block. Its nested items can share rows, so adding their individual
+  // heights exaggerates the true section height and creates an empty page.
+  const contentHeight = splittable
+    ? itemHeight + fixedContentHeight
+    : measuredContentHeight;
 
   return {
 
@@ -185,9 +190,7 @@ static createSection(
       headingHeight +
       contentHeight,
 
-    splittable:
-      element.dataset.splittable ===
-      "true",
+    splittable,
 
     items,
 
