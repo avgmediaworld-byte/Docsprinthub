@@ -115,12 +115,16 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
       JOIN analytics_visitors v ON v.visitor_hash = e.visitor_hash
     `,
     sql`
-      SELECT TO_CHAR(e.occurred_at AT TIME ZONE ${timeZone}, 'Mon DD') AS label,
-             COUNT(DISTINCT e.visitor_hash) AS count
-      FROM analytics_events e
-      WHERE e.occurred_at >= (${dayStart} - INTERVAL '6 days')
-      GROUP BY DATE(e.occurred_at AT TIME ZONE ${timeZone}), label
-      ORDER BY DATE(e.occurred_at AT TIME ZONE ${timeZone})
+      WITH daily_visitors AS (
+        SELECT DATE(e.occurred_at AT TIME ZONE ${timeZone}) AS day,
+               COUNT(DISTINCT e.visitor_hash) AS count
+        FROM analytics_events e
+        WHERE e.occurred_at >= (${dayStart} - INTERVAL '6 days')
+        GROUP BY 1
+      )
+      SELECT TO_CHAR(day, 'Mon DD') AS label, count
+      FROM daily_visitors
+      ORDER BY day
     `,
     sql`
       SELECT page_path AS label, COUNT(*) AS count

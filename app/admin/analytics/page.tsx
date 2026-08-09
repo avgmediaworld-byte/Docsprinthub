@@ -54,6 +54,10 @@ function SetupState() {
   return <section className="mx-auto mt-10 max-w-2xl rounded-2xl border border-amber-200 bg-amber-50 p-6 text-amber-950"><h1 className="text-2xl font-bold">Analytics needs setup</h1><p className="mt-3 leading-7">Add the analytics environment variables and run the database migration. No analytics data is shown until the real PostgreSQL database is available.</p><pre className="mt-5 overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-slate-100">npm run analytics:migrate</pre></section>;
 }
 
+function DatabaseUnavailableState() {
+  return <section className="mx-auto mt-10 max-w-2xl rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-950"><h1 className="text-2xl font-bold">Analytics database is unavailable</h1><p className="mt-3 leading-7">Analytics is configured, but the dashboard could not read its report. Check the deployment logs for the PostgreSQL error code, then verify the database connection and schema.</p></section>;
+}
+
 export default async function AnalyticsDashboardPage() {
   await requireAnalyticsAdmin();
 
@@ -62,8 +66,13 @@ export default async function AnalyticsDashboardPage() {
   let report: AnalyticsReport;
   try {
     report = await getAnalyticsReport();
-  } catch {
-    return <SetupState />;
+  } catch (error) {
+    const databaseError = error && typeof error === "object" ? error as { code?: unknown } : null;
+    console.error("Analytics dashboard report query failed.", {
+      code: typeof databaseError?.code === "string" ? databaseError.code : "unknown",
+      name: error instanceof Error ? error.name : "UnknownError",
+    });
+    return <DatabaseUnavailableState />;
   }
 
   return <main className="min-h-screen bg-slate-50 px-5 py-7 text-slate-950 sm:px-8 sm:py-10"><div className="mx-auto max-w-7xl"><header className="flex flex-wrap items-start justify-between gap-5"><div><p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">Private first-party analytics</p><h1 className="mt-2 text-4xl font-bold tracking-tight">DocSprintHub Analytics</h1><p className="mt-3 max-w-2xl leading-7 text-slate-600">Anonymous, aggregate usage data only. No document content, feedback, names, emails, IP addresses, or user-agent strings are stored.</p></div><div className="flex items-center gap-3"><Link href="/" className="rounded-xl px-3 py-2 text-sm font-bold text-blue-700 hover:bg-blue-50">View site</Link><LogoutButton /></div></header>
