@@ -229,6 +229,14 @@ export const MinimalWhiteTheme = createTheme({
 
   name: "Minimal White",
 
+  layoutId: "academic01",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "circle-pattern",
+  ],
+
 });
 
 /* ===========================================================

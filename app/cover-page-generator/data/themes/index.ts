@@ -14,9 +14,9 @@ export * from "./base";
 
 export * from "./constants";
 
-export * from "./helpers";
+export * as ThemeHelpers from "./helpers";
 
-export * from "./types";
+export * as ThemeRuntimeTypes from "./types";
 
 /* ===========================================================
    Theme Categories

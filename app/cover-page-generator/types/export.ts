@@ -523,7 +523,13 @@ export function createExportConfig(
 
     },
 
-    watermark: builder.watermark,
+    watermark: builder.watermark ? {
+
+      ...builder.watermark,
+
+      enabled: builder.watermark.enabled ?? false,
+
+    } : undefined,
 
     metadata: builder.metadata,
 
@@ -635,13 +641,15 @@ export function mergeExportConfig(
 
     },
 
-    watermark: {
+    watermark: base.watermark || update.watermark ? {
 
       ...base.watermark,
 
       ...update.watermark,
 
-    },
+      enabled: update.watermark?.enabled ?? base.watermark?.enabled ?? false,
+
+    } : undefined,
 
     metadata: {
 

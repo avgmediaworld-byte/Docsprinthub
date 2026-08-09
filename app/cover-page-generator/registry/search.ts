@@ -5,7 +5,7 @@
    Version : 1.0.0
 =========================================================== */
 
-import type { ThemeConfiguration } from "../themes/base";
+import type { ThemeConfiguration } from "../data/themes/base";
 
 import {
 

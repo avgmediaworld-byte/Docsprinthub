@@ -36,10 +36,10 @@ export default function Home() {
     ];
 
   return (
-    <main className="min-h-screen bg-white">
+    <main className="min-h-screen bg-slate-100 text-slate-950">
 
       {/* Navbar */}
-      <nav className="flex items-center px-8 py-3 border-b border-gray-200 bg-white">
+      <nav className="flex items-center px-8 py-3 border-b border-slate-300 bg-white">
 
       <div className="flex items-center gap-1">
         <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
@@ -55,7 +55,7 @@ export default function Home() {
       </Link>
       <a href="#" className="hover:text-blue-600 transition">Letter Writer</a>
       <Link href="/pdf-tools" className="hover:text-blue-600 transition">PDF Tools</Link>
-      <a href="#" className="hover:text-blue-600 transition">Contact</a>
+      <Link href="/help-support" className="hover:text-blue-600 transition">Help & Support</Link>
       </div>
 
       <button className="ml-auto bg-blue-600 text-white font-semibold px-7 py-3 rounded-xl shadow-md hover:bg-blue-700 hover:shadow-lg transition duration-300">
@@ -66,13 +66,13 @@ export default function Home() {
 
       {/* Hero Section */}
     
-      <section className="text-center py-6 px-6 bg-gradient-to-b from-blue-50 to-white">
+      <section className="text-center py-6 px-6 bg-gradient-to-b from-blue-100 via-slate-50 to-slate-100">
 
         <h2 className="text-5xl font-bold text-gray-900">
         Professional Document & PDF Tools
         </h2>
 
-        <p className="mt-5 text-xl font italic text-gray-600 max-w-3xl mx-auto">
+        <p className="mt-5 text-xl font italic text-slate-600 max-w-3xl mx-auto">
           Create, Edit & Manage Documents, PDFs and More — All in One Place.
         </p>
 
@@ -95,19 +95,19 @@ export default function Home() {
       <section className="max-w-5xl mx-auto py-8 px-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
 
-          <div className="p-4 rounded-xl bg-blue-50">
+          <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
             <h3 className="font-semibold">Free to Start</h3>
           </div>
 
-          <div className="p-4 rounded-xl bg-blue-50">
+          <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
             <h3 className="font-semibold">Hindi & English</h3>
           </div>
 
-          <div className="p-4 rounded-xl bg-blue-50">
+          <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
             <h3 className="font-semibold">Mobile Friendly</h3>
           </div>
 
-          <div className="p-4 rounded-xl bg-blue-50">
+          <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
             <h3 className="font-semibold">Easy to Use</h3>
           </div>
 
@@ -124,9 +124,9 @@ export default function Home() {
 
             {tools.map((tool) => (
             <Link key={tool.title} href={tool.link}>
-            <div className="bg-white border border-black rounded-2xl p-6 shadow-md hover:shadow-xl hover:-translate-y-2 transition-all duration-300"
+            <div className="bg-white border border-slate-300 rounded-2xl px-6 pt-4 pb-6 shadow-md hover:shadow-xl hover:-translate-y-2 transition-all duration-300"
               >
-            <h3>{tool.title}</h3>
+            <h3 className="mb-2 text-center text-lg font-bold text-[#0b1f4d]">{tool.title}</h3>
             <p>{tool.description}</p>
              </div>
             </Link>
@@ -136,7 +136,7 @@ export default function Home() {
       </section>
 
       {/* Why Choose */}
-      <section className="bg-slate-50 pt-8 pb-8">
+      <section className="bg-blue-100 pt-7 pb-7">
 
         <div className="max-w-5xl mx-auto px-6 text-center">
 
@@ -199,7 +199,7 @@ export default function Home() {
           <a href="#">About</a>
           <a href="#">Privacy Policy</a>
           <a href="#">Terms & Conditions</a>
-          <a href="#">Contact</a>
+          <Link href="/help-support">Help & Support</Link>
         </div>
       </div>
 

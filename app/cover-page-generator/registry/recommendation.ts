@@ -5,7 +5,7 @@
    Version : 1.0.0
 =========================================================== */
 
-import type { ThemeConfiguration } from "../themes/base";
+import type { ThemeConfiguration } from "../data/themes/base";
 
 import type { ThemeCategory } from "./theme-registry";
 
@@ -167,7 +167,7 @@ export function recommendByCategory(
 
   category: ThemeCategory,
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -195,7 +195,7 @@ export function recommendByVariant(
 
   variant: string,
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -229,7 +229,7 @@ export function recommendByMode(
 
   mode: "light" | "dark",
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -259,7 +259,7 @@ export function recommendByDocumentType(
 
   documentType: string,
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -349,7 +349,7 @@ export function recommendByDocumentType(
 
 export function getFeaturedRecommendations(
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -385,7 +385,7 @@ export function getFeaturedRecommendations(
 
 export function getPremiumRecommendations(
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 
@@ -421,7 +421,7 @@ export function getPremiumRecommendations(
 
 export function getRandomRecommendations(
 
-  limit = RecommendationConfiguration.defaultLimit
+  limit: number = RecommendationConfiguration.defaultLimit
 
 ): RecommendationResult {
 

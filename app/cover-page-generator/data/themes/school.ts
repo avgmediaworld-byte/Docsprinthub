@@ -19,6 +19,8 @@ import {
 
 export type SchoolThemeId =
 
+  | "school-project"
+
   | "classic-school"
 
   | "colorful-school"
@@ -516,6 +518,40 @@ export const TeacherEditionTheme = createTheme({
 
 });
 
+/* Gallery template: playful, print-safe science composition */
+export const SchoolProjectGalleryTheme = createTheme({
+
+  ...SchoolBaseTheme,
+
+  id: "school-project",
+
+  name: "School Project",
+
+  variant: "creative",
+
+  layoutId: "creative01",
+
+  backgroundId: "green-nature",
+
+  decorationIds: [
+    "circle-pattern",
+    "dots",
+  ],
+
+  palette: {
+
+    ...SchoolBaseTheme.palette,
+
+    primary: "#0F766E",
+
+    secondary: "#14B8A6",
+
+    accent: "#F59E0B",
+
+  },
+
+});
+
 /* ===========================================================
    Registry Update
 =========================================================== */
@@ -531,6 +567,8 @@ SchoolThemes.push(
   ModernEducationTheme,
 
   TeacherEditionTheme,
+
+  SchoolProjectGalleryTheme,
 
 );
 

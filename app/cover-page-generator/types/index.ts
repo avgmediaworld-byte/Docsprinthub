@@ -13,13 +13,13 @@ export * from "./theme";
 
 export * from "./template";
 
-export * from "./layout";
+export * as LayoutTypes from "./layout-types";
 
 export * from "./content";
 
 export * from "./editor";
 
-export * from "./page-config";
+export * as PageConfigurationTypes from "./page-config";
 
 export * from "./export";
 

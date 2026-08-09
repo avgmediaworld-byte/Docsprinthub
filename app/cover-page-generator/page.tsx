@@ -2,133 +2,199 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { ChangeEvent, useRef, useState } from "react";
-import html2canvas from "html2canvas";
-import jsPDF from "jspdf";
+import { useRouter } from "next/navigation";
+import TemplateGallery from "./components/TemplateGallery";
+import useCoverPage from "./templates/hooks/useCoverPage";
+import AcademicTemplatePreview, { isAcademicTemplate } from "./templates/academic/AcademicTemplatePreview";
 
-type Template = "academic" | "modern" | "minimal";
+type PreviewVariant = "academic" | "modern" | "minimal" | "glass" | "split" | "hero" | "signature";
 
-const templateOptions: Array<{ id: Template; title: string; description: string }> = [
-  { id: "academic", title: "Academic Frame", description: "Premium college report design" },
-  { id: "modern", title: "Modern Studio", description: "Bold project and portfolio cover" },
-  { id: "minimal", title: "Editorial", description: "Elegant magazine-style composition" },
-];
-
-async function waitForRender() {
-  await document.fonts.ready;
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+interface PreviewConfig {
+  variant: PreviewVariant;
+  background: string;
+  accent: string;
+  accent2: string;
+  textColor: string;
+  badge: string;
+  accentShape: "circle" | "blob" | "stripe" | "angle";
 }
 
-async function captureA4(element: HTMLElement) {
-  const surface = document.createElement("div");
-  const clone = element.cloneNode(true) as HTMLElement;
-  surface.style.cssText = "position:fixed;left:-100000px;top:0;width:210mm;height:297mm;overflow:hidden;pointer-events:none;";
-  clone.style.width = "210mm";
-  clone.style.minWidth = "210mm";
-  clone.style.maxWidth = "210mm";
-  clone.style.height = "297mm";
-  clone.style.minHeight = "297mm";
-  clone.style.maxHeight = "297mm";
-  clone.style.margin = "0";
-  clone.style.transform = "none";
-  surface.append(clone);
-  document.body.append(surface);
-  try {
-    await waitForRender();
-    return await html2canvas(clone, { scale: 2, width: clone.offsetWidth, height: clone.offsetHeight, windowWidth: clone.offsetWidth, windowHeight: clone.offsetHeight, backgroundColor: "#ffffff", useCORS: true, logging: false, scrollX: 0, scrollY: 0 });
-  } finally {
-    surface.remove();
-  }
+function hashString(value: string) {
+  return value.split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
 }
 
-function downloadBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 500);
+function formatTemplateLabel(id: string) {
+  return id
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .replace(/\bOf\b/g, "of");
+}
+
+function getPreviewConfig(templateId: string): PreviewConfig {
+  const seed = hashString(templateId);
+  const styles: PreviewConfig[] = [
+    { variant: "academic", background: "bg-slate-50 text-slate-900", accent: "bg-blue-950", accent2: "bg-amber-400", textColor: "text-slate-900", badge: "Academic", accentShape: "circle" },
+    { variant: "modern", background: "bg-slate-950 text-white", accent: "bg-cyan-400", accent2: "bg-blue-600/20", textColor: "text-white", badge: "Modern", accentShape: "blob" },
+    { variant: "minimal", background: "bg-white text-slate-900", accent: "bg-slate-900", accent2: "bg-slate-200", textColor: "text-slate-900", badge: "Minimal", accentShape: "stripe" },
+    { variant: "glass", background: "bg-slate-950 text-white", accent: "bg-white/10", accent2: "bg-cyan-300/15", textColor: "text-white", badge: "Glass", accentShape: "angle" },
+    { variant: "split", background: "bg-white text-slate-900", accent: "bg-indigo-950", accent2: "bg-slate-100", textColor: "text-slate-900", badge: "Split", accentShape: "angle" },
+    { variant: "hero", background: "bg-gradient-to-br from-violet-900 via-fuchsia-700 to-pink-500 text-white", accent: "bg-white/10", accent2: "bg-yellow-300/20", textColor: "text-white", badge: "Hero", accentShape: "blob" },
+    { variant: "signature", background: "bg-amber-50 text-slate-950", accent: "bg-slate-950", accent2: "bg-slate-200", textColor: "text-slate-950", badge: "Signature", accentShape: "circle" },
+  ];
+
+  return styles[seed % styles.length];
 }
 
 function Input({ label, value, onChange, placeholder = "" }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {
   return <label className="block"><span className="text-sm font-bold text-slate-800">{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>;
 }
 
+function renderPreview(config: PreviewConfig, data: { institute: string; title: string; subtitle: string; topic: string; course: string; author: string; rollNumber: string; guide: string; session: string; logoUrl: string; selectedTemplateId: string; }) {
+  const shapeClasses = config.accentShape === "circle" ? "rounded-full" : config.accentShape === "blob" ? "rounded-3xl" : config.accentShape === "stripe" ? "-skew-y-6" : "rotate-6";
+  const badgeTextColor = config.textColor.includes("white") ? "text-white" : "text-slate-900";
+
+  return (
+    <div className="relative flex h-full flex-col justify-between overflow-hidden px-10 py-10">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className={`absolute -right-20 top-16 h-72 w-72 ${config.accent} ${shapeClasses} opacity-90`} />
+        <div className={`absolute -left-16 bottom-16 h-64 w-64 ${config.accent2} ${shapeClasses} opacity-70`} />
+      </div>
+      <div className="relative z-10 flex h-full flex-col justify-between gap-8">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className={`inline-flex rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] ${config.accent} ${badgeTextColor}`}>{config.badge}</p>
+            <p className={`mt-4 text-xs uppercase tracking-[0.32em] ${badgeTextColor}`}>Template · {formatTemplateLabel(data.selectedTemplateId)}</p>
+          </div>
+          <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-3xl border border-white/20 bg-white/10 text-xl font-black text-white shadow-lg">
+            {data.logoUrl ? <Image src={data.logoUrl} alt="Logo" width={64} height={64} unoptimized className="h-full w-full object-contain" /> : <span className="text-white">DS</span>}
+          </div>
+        </div>
+        <div className="relative z-10 text-center">
+          <p className={`mb-4 text-sm font-semibold uppercase tracking-[0.32em] ${config.textColor}`}>{data.institute}</p>
+          <h1 className={`mx-auto max-w-3xl text-5xl font-black leading-tight ${config.textColor}`}>{data.topic}</h1>
+          <p className={`mt-6 text-lg font-semibold ${config.textColor}`}>{data.course}</p>
+        </div>
+        <div className={`grid gap-3 rounded-3xl border p-6 ${config.accent2} bg-white/80 backdrop-blur-sm shadow-xl ${config.textColor}`}>
+          <div>
+            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Title</p>
+            <p className="mt-2 text-xl font-bold text-slate-900">{data.title}</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Submitted by</p>
+              <p className="mt-2 text-lg font-semibold text-slate-900">{data.author}</p>
+              <p className="text-sm text-slate-600">{data.rollNumber}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Submitted to</p>
+              <p className="mt-2 text-lg font-semibold text-slate-900">{data.guide}</p>
+              <p className="text-sm text-slate-600">{data.session}</p>
+            </div>
+          </div>
+          <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Subtitle</p>
+          <p className="text-base font-medium text-slate-700">{data.subtitle}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CoverPageGeneratorPage() {
-  const [template, setTemplate] = useState<Template>("academic");
-  const [title, setTitle] = useState("PROJECT REPORT");
-  const [subtitle, setSubtitle] = useState("ON");
-  const [topic, setTopic] = useState("Your Project Title Here");
-  const [course, setCourse] = useState("Bachelor of Computer Applications");
-  const [author, setAuthor] = useState("Your Name");
-  const [rollNumber, setRollNumber] = useState("Roll No. 0000");
-  const [guide, setGuide] = useState("Guide / Faculty Name");
-  const [institute, setInstitute] = useState("Your College or Institute Name");
-  const [session, setSession] = useState("Academic Session 2026–27");
-  const [logo, setLogo] = useState<File | null>(null);
-  const [logoUrl, setLogoUrl] = useState("");
-  const [isExporting, setIsExporting] = useState(false);
-  const [error, setError] = useState("");
-  const pageRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
 
-  function uploadLogo(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] ?? null;
-    if (file && !["image/png", "image/jpeg"].includes(file.type)) setError("Please select a PNG or JPG logo.");
-    else if (file) {
-      const reader = new FileReader();
-      reader.onload = () => setLogoUrl(typeof reader.result === "string" ? reader.result : "");
-      reader.readAsDataURL(file);
-      setLogo(file);
-      setError("");
-    } else {
-      setLogo(null);
-      setLogoUrl("");
-    }
-    event.target.value = "";
-  }
+  return (
+    <main className="min-h-screen bg-slate-50 text-slate-900">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
+          <Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl">
+            <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
+            DocSprint<span className="text-blue-600">Hub</span>
+          </Link>
+          <Link href="/resume-builder" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 sm:px-5">
+            Resume Builder
+          </Link>
+        </div>
+      </header>
+      <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-8 text-center sm:px-8 sm:py-10">
+        <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p>
+        <h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">Cover Page Generator</h1>
+        <p className="mx-auto mt-3 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">Choose an A4-ready design, then customise every part on its own editor page.</p>
+      </section>
+      <section className="mx-auto w-full px-4 py-8 lg:px-6 xl:px-8 2xl:px-10" style={{ maxWidth: "1620px" }}>
+        <TemplateGallery selectedTemplateId="" onSelectTemplate={(templateId) => router.push(`/cover-page-generator/editor/${encodeURIComponent(templateId)}`)} />
+      </section>
+    </main>
+  );
 
-  async function exportFile(format: "pdf" | "jpg") {
-    if (!pageRef.current) return;
-    setIsExporting(true); setError("");
-    try {
-      const canvas = await captureA4(pageRef.current);
-      if (format === "jpg") {
-        const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error("The JPG could not be created.")), "image/jpeg", 0.95));
-        downloadBlob(blob, "cover-page-a4.jpg");
-      } else {
-        const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
-        pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, 210, 297, undefined, "FAST");
-        pdf.setProperties({ title: title || "Cover Page", author: "DocSprintHub", subject: "A4 Cover Page" });
-        pdf.save("cover-page-a4.pdf");
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "The file could not be exported.");
-    } finally { setIsExporting(false); }
-  }
+  /* Legacy inline editor moved to the dedicated CoverPageEditor route.
+  const {
+    selectedTemplateId,
+    title,
+    subtitle,
+    topic,
+    course,
+    author,
+    rollNumber,
+    guide,
+    institute,
+    session,
+    logo,
+    logoUrl,
+    isExporting,
+    error,
+    pageRef,
+    setTitle,
+    setSubtitle,
+    setTopic,
+    setCourse,
+    setAuthor,
+    setRollNumber,
+    setGuide,
+    setInstitute,
+    setSession,
+    uploadLogo,
+    exportFile,
+    handleSelectGalleryTemplate,
+    reset,
+  } = useCoverPage();
 
-  function reset() {
-    setTemplate("academic"); setTitle("PROJECT REPORT"); setSubtitle("ON"); setTopic("Your Project Title Here"); setCourse("Bachelor of Computer Applications"); setAuthor("Your Name"); setRollNumber("Roll No. 0000"); setGuide("Guide / Faculty Name"); setInstitute("Your College or Institute Name"); setSession("Academic Session 2026–27"); setLogo(null); setLogoUrl(""); setError("");
-  }
-
+  const previewConfig = getPreviewConfig(selectedTemplateId);
+  const previewData = { institute, title, subtitle, topic, course, author, rollNumber, guide, session, logoUrl, selectedTemplateId };
+  const isLiveTemplate = isAcademicTemplate(selectedTemplateId);
 
   return <main className="min-h-screen bg-slate-50 text-slate-900">
     <style>{`@page { size: A4 portrait; margin: 0; } @media print { body * { visibility: hidden !important; } #cover-print, #cover-print * { visibility: visible !important; } #cover-print { position: fixed; left: 0; top: 0; width: 210mm !important; height: 297mm !important; margin: 0 !important; box-shadow: none !important; } }`}</style>
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8"><Link href="/" className="inline-flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl"><Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />DocSprint<span className="text-blue-600">Hub</span></Link><Link href="/resume-builder" className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 sm:px-5">Resume Builder</Link></div></header>
     <section className="border-b border-blue-100 bg-gradient-to-b from-blue-50 to-slate-50 px-5 py-8 text-center sm:px-8 sm:py-10"><p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-700">DocSprintHub</p><h1 className="mt-2 text-4xl font-bold tracking-tight text-slate-950 sm:text-5xl">Cover Page Generator</h1><p className="mx-auto mt-3 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">Create a professional A4 cover page for assignments, reports and projects.</p></section>
-    <section className="mx-auto grid max-w-7xl gap-7 px-5 py-7 sm:px-8 lg:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)] lg:py-10">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7"><h2 className="text-2xl font-bold">Cover page details</h2><p className="mt-2 text-slate-600">Every change appears in the preview immediately.</p><div className="mt-6 grid gap-3">{templateOptions.map((option) => <button key={option.id} type="button" onClick={() => setTemplate(option.id)} className={`rounded-xl border p-4 text-left transition ${template === option.id ? "border-blue-600 bg-blue-50 ring-1 ring-blue-600" : "border-slate-200 hover:border-blue-300 hover:bg-slate-50"}`}><span className="block font-bold">{option.title}</span><span className="mt-1 block text-sm text-slate-600">{option.description}</span></button>)}</div><div className="mt-7 grid gap-4"><Input label="Cover heading" value={title} onChange={setTitle} placeholder="PROJECT REPORT" /><Input label="Small heading" value={subtitle} onChange={setSubtitle} placeholder="ON" /><Input label="Project / assignment title" value={topic} onChange={setTopic} /><Input label="Course / subject" value={course} onChange={setCourse} /><div className="grid gap-4 sm:grid-cols-2"><Input label="Submitted by" value={author} onChange={setAuthor} /><Input label="Roll number" value={rollNumber} onChange={setRollNumber} /></div><div className="grid gap-4 sm:grid-cols-2"><Input label="Submitted to" value={guide} onChange={setGuide} /><Input label="Session / date" value={session} onChange={setSession} /></div><Input label="College / institute" value={institute} onChange={setInstitute} /><label><span className="text-sm font-bold text-slate-800">Institute logo (optional)</span><span className="mt-2 flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50">{logo ? logo.name : "Choose PNG or JPG"}<input type="file" accept="image/png,image/jpeg" className="sr-only" onChange={uploadLogo} /></span></label></div><div className="mt-7 grid gap-3 sm:grid-cols-2"><button type="button" onClick={() => exportFile("pdf")} disabled={isExporting} className="rounded-xl bg-blue-600 px-4 py-3 font-bold text-white hover:bg-blue-700 disabled:bg-blue-400">{isExporting ? "Preparing..." : "Download A4 PDF"}</button><button type="button" onClick={() => exportFile("jpg")} disabled={isExporting} className="rounded-xl border border-blue-600 px-4 py-3 font-bold text-blue-700 hover:bg-blue-50">Download JPG</button><button type="button" onClick={() => window.print()} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Print A4</button><button type="button" onClick={reset} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Reset</button></div>{error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}</section>
-      <aside className="overflow-auto rounded-2xl border border-slate-200 bg-slate-200 p-4 shadow-sm sm:p-6"><p className="mb-4 text-center text-sm font-semibold text-slate-600">Live A4 preview</p><div className="min-w-[210mm] pb-2"><div id="cover-print" ref={pageRef} className={`relative overflow-hidden shadow-xl ${template === "modern" ? "bg-slate-950 text-white" : "bg-white text-slate-900"}`} style={{ width: "210mm", height: "297mm" }}>
-        {template === "academic" && <>
-          <div className="absolute inset-7 border-[3px] border-blue-900" /><div className="absolute inset-10 border border-blue-300" />
-          <div className="absolute -right-16 top-28 h-72 w-72 rounded-full bg-blue-100" /><div className="absolute -left-20 bottom-24 h-64 w-64 rounded-full bg-amber-100" />
-          <div className="relative flex h-full flex-col px-24 py-20 text-center"><div className="flex items-center justify-between"><div className="h-20 w-20 overflow-hidden rounded-2xl border-2 border-blue-900 bg-white p-2">{logoUrl ? <img src={logoUrl} alt="Institute logo" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-2xl font-black text-blue-900">DS</span>}</div><div className="text-right"><p className="text-xs font-bold tracking-[0.24em] text-blue-800">DOCSPRINTHUB</p><p className="mt-2 text-sm text-slate-500">Academic cover series</p></div></div><div className="mt-20"><p className="text-lg font-bold tracking-[0.2em] text-blue-900">{institute}</p><div className="mx-auto mt-7 h-1 w-28 bg-amber-400" /><p className="mt-20 text-base font-bold tracking-[0.35em] text-slate-600">{title}</p><p className="mt-8 text-sm font-semibold tracking-[0.3em] text-blue-800">{subtitle}</p><h2 className="mt-7 text-5xl font-black leading-[1.12] text-blue-950">{topic}</h2><p className="mt-10 text-xl text-slate-700">{course}</p></div><div className="mt-auto grid grid-cols-2 gap-7 border-t-2 border-blue-900 pt-8 text-left"><div><p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Prepared by</p><p className="mt-3 text-2xl font-bold text-blue-950">{author}</p><p className="mt-1 text-base">{rollNumber}</p></div><div className="border-l border-blue-200 pl-7"><p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">Submitted to</p><p className="mt-3 text-xl font-bold text-blue-950">{guide}</p><p className="mt-1 text-base">{session}</p></div></div></div>
-        </>}
-        {template === "modern" && <><div className="absolute -right-24 -top-20 h-96 w-96 rounded-full bg-cyan-400/20" /><div className="absolute -bottom-32 -left-24 h-96 w-96 rounded-full bg-blue-600/30" /><div className="relative flex h-full flex-col px-20 py-20"><div className="flex items-center justify-between"><p className="text-sm font-bold tracking-[0.3em] text-cyan-300">{institute}</p>{logoUrl && <div className="h-16 w-16 overflow-hidden rounded-xl bg-white p-2"><img src={logoUrl} alt="Institute logo" className="h-full w-full object-contain" /></div>}</div><div className="mt-32"><p className="text-xl font-semibold tracking-[0.22em] text-cyan-300">{title}</p><h2 className="mt-6 text-6xl font-bold leading-tight">{topic}</h2><div className="mt-8 h-2 w-32 bg-cyan-400" /><p className="mt-8 text-xl text-slate-300">{course}</p></div><div className="mt-auto border-t border-white/30 pt-8"><p className="text-base text-slate-300">Prepared by</p><p className="mt-2 text-2xl font-bold">{author}</p><p className="mt-1 text-slate-300">{rollNumber}</p><div className="mt-8 flex justify-between text-sm text-slate-300"><span>{guide}</span><span>{session}</span></div></div></div></>}
-        {template === "minimal" && <><div className="mx-16 mt-16 border-y-4 border-slate-900 py-7 text-center"><p className="text-lg font-bold tracking-[0.2em]">{institute}</p></div><div className="flex h-[calc(100%-170px)] flex-col px-24 py-24 text-center"><p className="text-sm font-bold tracking-[0.32em] text-slate-500">{title}</p><h2 className="mt-10 text-5xl font-bold leading-tight">{topic}</h2><p className="mt-8 text-xl text-slate-600">{subtitle}</p>{logoUrl && <div className="mx-auto mt-14 h-24 w-24 overflow-hidden"><img src={logoUrl} alt="Institute logo" className="h-full w-full object-contain" /></div>}<p className="mt-12 text-lg">{course}</p><div className="mt-auto text-base"><p className="font-bold">{author}</p><p className="mt-1">{rollNumber}</p><p className="mt-8">Submitted to: {guide}</p><p className="mt-2 text-slate-600">{session}</p></div></div></>}
-      </div></div></aside>
+    <section className="mx-auto w-full px-4 py-8 lg:px-6 xl:px-8 2xl:px-10" style={{ maxWidth: "1620px" }}>
+      <TemplateGallery selectedTemplateId={selectedTemplateId} onSelectTemplate={handleSelectGalleryTemplate} />
     </section>
+    {selectedTemplateId ? <section id="cover-page-editor" className="mx-auto grid max-w-7xl gap-7 px-5 py-7 sm:px-8 lg:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)] lg:py-10">
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-bold">Cover page details</h2>
+            <p className="mt-2 text-slate-600">Choose a template from the gallery and update your cover page details live.</p>
+          </div>
+          <div className="rounded-full bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700">Selected: {formatTemplateLabel(selectedTemplateId)}</div>
+        </div>
+        <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">Live preview updates whenever you select a template or change the fields below.</div>
+        <div className="mt-7 grid gap-4"><Input label="Cover heading" value={title} onChange={setTitle} placeholder="PROJECT REPORT" /><Input label="Small heading" value={subtitle} onChange={setSubtitle} placeholder="ON" /><Input label="Project / assignment title" value={topic} onChange={setTopic} /><Input label="Course / subject" value={course} onChange={setCourse} /><div className="grid gap-4 sm:grid-cols-2"><Input label="Submitted by" value={author} onChange={setAuthor} /><Input label="Roll number" value={rollNumber} onChange={setRollNumber} /></div><div className="grid gap-4 sm:grid-cols-2"><Input label="Submitted to" value={guide} onChange={setGuide} /><Input label="Session / date" value={session} onChange={setSession} /></div><Input label="College / institute" value={institute} onChange={setInstitute} /><label><span className="text-sm font-bold text-slate-800">Institute logo (optional)</span><span className="mt-2 flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-50">{logo ? logo.name : "Choose PNG or JPG"}<input type="file" accept="image/png,image/jpeg" className="sr-only" onChange={uploadLogo} /></span></label></div><div className="mt-7 grid gap-3 sm:grid-cols-2"><button type="button" onClick={() => exportFile("pdf")} disabled={isExporting} className="rounded-xl bg-blue-600 px-4 py-3 font-bold text-white hover:bg-blue-700 disabled:bg-blue-400">{isExporting ? "Preparing..." : "Download A4 PDF"}</button><button type="button" onClick={() => exportFile("jpg")} disabled={isExporting} className="rounded-xl border border-blue-600 px-4 py-3 font-bold text-blue-700 hover:bg-blue-50">Download JPG</button><button type="button" onClick={() => window.print()} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Print A4</button><button type="button" onClick={reset} className="rounded-xl border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50">Reset</button></div>{error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}
+      </section>
+      <aside className="overflow-auto rounded-2xl border border-slate-200 bg-slate-200 p-4 shadow-sm sm:p-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+          <p className="font-semibold text-slate-600">Live A4 preview</p>
+          <span className={`rounded-full px-3 py-1 text-[11px] font-semibold ${isLiveTemplate ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+            {isLiveTemplate ? "Live production template" : "Blank cover preview"}
+          </span>
+        </div>
+        <div className="min-w-[210mm] pb-2">
+          <div id="cover-print" ref={pageRef} className={`relative overflow-hidden shadow-xl ${previewConfig.background}`} style={{ width: "210mm", height: "297mm" }}>
+            {isLiveTemplate ? <AcademicTemplatePreview templateId={selectedTemplateId} data={previewData} /> : renderPreview(previewConfig, previewData)}
+          </div>
+        </div>
+      </aside>
+    </section> : <section className="mx-auto max-w-7xl px-5 pb-12 pt-2 text-center sm:px-8"><p className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-7 text-sm font-medium text-slate-600">Select a template above to open the cover page editor and customise its details.</p></section>}
   </main>;
+  */
 }

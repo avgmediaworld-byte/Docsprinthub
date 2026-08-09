@@ -258,15 +258,26 @@ export const AIFutureTheme = createTheme({
 
   variant: "modern",
 
+  mode: "dark",
+
+  layoutId: "creative01",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "hexagon",
+    "dots",
+  ],
+
   palette: {
 
     ...TechnologyBaseTheme.palette,
 
-    primary: "#4F46E5",
+    primary: "#DBEAFE",
 
     secondary: "#6366F1",
 
-    accent: "#A78BFA",
+    accent: "#22D3EE",
 
   },
 

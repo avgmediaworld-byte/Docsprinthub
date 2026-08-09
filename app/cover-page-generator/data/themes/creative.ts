@@ -217,6 +217,32 @@ export const PortfolioProTheme = createTheme({
 
   name: "Portfolio Pro",
 
+  mode: "dark",
+
+  layoutId: "creative01",
+
+  backgroundId: "royal-purple",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
+
+  palette: {
+
+    ...CreativeBaseTheme.palette,
+
+    primary: "#FDF4FF",
+
+    secondary: "#F0ABFC",
+
+    accent: "#F9A8D4",
+
+    text: "#0F172A",
+
+    border: "#F0ABFC",
+
+  },
+
 });
 
 /* ===========================================================

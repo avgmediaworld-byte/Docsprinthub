@@ -22,7 +22,7 @@ export * from "./category-registry";
    Search Engine
 =========================================================== */
 
-export * from "./search";
+export * as ThemeSearch from "./search";
 
 /* ===========================================================
    Recommendation Engine
@@ -34,13 +34,20 @@ export * from "./recommendation";
    Statistics Engine
 =========================================================== */
 
-export * from "./statistics";
+export * as RegistryStatistics from "./statistics";
 
 /* ===========================================================
    Theme Loader
 =========================================================== */
 
 export * from "./loader";
+
+/* ===========================================================
+   Component Registry
+=========================================================== */
+
+export * from "./component-registry";
+
 
 /* ===========================================================
    Registry Metadata

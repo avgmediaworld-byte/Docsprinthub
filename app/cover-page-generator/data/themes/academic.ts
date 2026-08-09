@@ -35,7 +35,17 @@ export type AcademicThemeId =
 
   | "computer-science"
 
+  | "education-theme"
+
+  | "elegant-border"
+
   | "education-classic"
+
+  | "minimal-academic"
+
+  | "modern-university"
+
+  | "premium-academic"
 
   | "law-professional";
 
@@ -52,6 +62,15 @@ export const AcademicBaseTheme = createTheme({
   mode: "light",
 
   variant: "modern",
+
+  layoutId: "academic01",
+
+  backgroundId: "gradient-blue",
+
+  decorationIds: [
+    "wave-top",
+    "wave-bottom",
+  ],
 
   status: "stable",
 
@@ -165,6 +184,14 @@ export const UniversityClassicTheme = createTheme({
 
   name: "University Classic",
 
+  layoutId: "academic02",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "dots",
+  ],
+
   palette: {
 
     ...AcademicBaseTheme.palette,
@@ -193,6 +220,14 @@ export const ResearchPaperTheme = createTheme({
 
   variant: "minimal",
 
+  layoutId: "academic01",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "circle-pattern",
+  ],
+
   typography: {
 
     ...AcademicBaseTheme.typography,
@@ -218,6 +253,14 @@ export const ThesisModernTheme = createTheme({
   name: "Thesis Modern",
 
   variant: "modern",
+
+  layoutId: "academic02",
+
+  backgroundId: "gradient-blue",
+
+  decorationIds: [
+    "wave-top",
+  ],
 
   palette: {
 
@@ -246,6 +289,14 @@ export const EngineeringBlueTheme = createTheme({
   name: "Engineering Blue",
 
   variant: "modern",
+
+  layoutId: "academic02",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "hexagon",
+  ],
 
   palette: {
 
@@ -299,6 +350,14 @@ export const MedicalWhiteTheme = createTheme({
 
   variant: "minimal",
 
+  layoutId: "academic01",
+
+  backgroundId: "green-nature",
+
+  decorationIds: [
+    "circle-pattern",
+  ],
+
   palette: {
 
     ...AcademicBaseTheme.palette,
@@ -326,6 +385,14 @@ export const CommerceGoldTheme = createTheme({
   name: "Commerce Gold",
 
   variant: "premium",
+
+  layoutId: "corporate01",
+
+  backgroundId: "royal-purple",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
 
   palette: {
 
@@ -355,6 +422,15 @@ export const ComputerScienceTheme = createTheme({
 
   variant: "modern",
 
+  layoutId: "academic02",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "hexagon",
+    "dots",
+  ],
+
   palette: {
 
     ...AcademicBaseTheme.palette,
@@ -383,6 +459,14 @@ export const EducationClassicTheme = createTheme({
 
   variant: "classic",
 
+  layoutId: "academic01",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "dots",
+  ],
+
   typography: {
 
     ...AcademicBaseTheme.typography,
@@ -409,6 +493,14 @@ export const LawProfessionalTheme = createTheme({
 
   variant: "premium",
 
+  layoutId: "corporate02",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
+
   palette: {
 
     ...AcademicBaseTheme.palette,
@@ -418,6 +510,179 @@ export const LawProfessionalTheme = createTheme({
     secondary: "#374151",
 
     accent: "#9CA3AF",
+
+  },
+
+});
+
+/* ===========================================================
+   Additional Gallery Templates
+   These configurations power the live A4 renderer. Each one deliberately
+   combines a background, composition and decoration treatment.
+=========================================================== */
+
+export const EducationThemeConfig = createTheme({
+
+  ...AcademicBaseTheme,
+
+  id: "education-theme",
+
+  name: "Education Classic",
+
+  variant: "classic",
+
+  layoutId: "academic01",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "dots",
+  ],
+
+  palette: {
+
+    ...AcademicBaseTheme.palette,
+
+    primary: "#166534",
+
+    secondary: "#16A34A",
+
+    accent: "#65A30D",
+
+  },
+
+});
+
+export const ElegantBorderTheme = createTheme({
+
+  ...AcademicBaseTheme,
+
+  id: "elegant-border",
+
+  name: "Elegant Border",
+
+  variant: "professional",
+
+  layoutId: "corporate02",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
+
+  palette: {
+
+    ...AcademicBaseTheme.palette,
+
+    primary: "#4338CA",
+
+    secondary: "#818CF8",
+
+    accent: "#8B5CF6",
+
+  },
+
+});
+
+export const MinimalAcademicTheme = createTheme({
+
+  ...AcademicBaseTheme,
+
+  id: "minimal-academic",
+
+  name: "Minimal Academic",
+
+  variant: "minimal",
+
+  layoutId: "academic01",
+
+  backgroundId: "minimal-white",
+
+  decorationIds: [
+    "circle-pattern",
+  ],
+
+  palette: {
+
+    ...AcademicBaseTheme.palette,
+
+    primary: "#1E293B",
+
+    secondary: "#64748B",
+
+    accent: "#475569",
+
+  },
+
+});
+
+export const ModernUniversityTheme = createTheme({
+
+  ...AcademicBaseTheme,
+
+  id: "modern-university",
+
+  name: "Modern University",
+
+  variant: "modern",
+
+  layoutId: "academic02",
+
+  backgroundId: "gradient-blue",
+
+  decorationIds: [
+    "wave-top",
+    "wave-bottom",
+  ],
+
+  palette: {
+
+    ...AcademicBaseTheme.palette,
+
+    primary: "#1E3A8A",
+
+    secondary: "#2563EB",
+
+    accent: "#06B6D4",
+
+  },
+
+});
+
+export const PremiumAcademicTheme = createTheme({
+
+  ...AcademicBaseTheme,
+
+  id: "premium-academic",
+
+  name: "Premium Academic",
+
+  mode: "dark",
+
+  variant: "premium",
+
+  layoutId: "corporate01",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
+
+  palette: {
+
+    ...AcademicBaseTheme.palette,
+
+    primary: "#FDE68A",
+
+    secondary: "#D97706",
+
+    accent: "#FBBF24",
+
+    text: "#0F172A",
+
+    border: "#FCD34D",
 
   },
 
@@ -438,6 +703,16 @@ AcademicThemes.push(
   EducationClassicTheme,
 
   LawProfessionalTheme,
+
+  EducationThemeConfig,
+
+  ElegantBorderTheme,
+
+  MinimalAcademicTheme,
+
+  ModernUniversityTheme,
+
+  PremiumAcademicTheme,
 
 );
 

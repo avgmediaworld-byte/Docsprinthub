@@ -14,7 +14,7 @@ export * from "./categories";
 
 export * from "./fonts";
 
-export * from "./template-list";
+export * from "./templateList";
 
 export * from "./icons";
 

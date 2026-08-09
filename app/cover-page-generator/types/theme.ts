@@ -30,7 +30,11 @@ export type ThemeVariant =
   | "dark"
   | "glass"
   | "gradient"
-  | "solid";
+  | "solid"
+  | "creative"
+  | "professional"
+  | "technology"
+  | "luxury";
 
 /* -----------------------------------------------------------
    Color Palette

@@ -5,7 +5,7 @@
    Version : 2.0
 =========================================================== */
 
-import type { TemplateLayout } from "./layout";
+import type { TemplateLayout } from "./layout-types";
 import type { UniversalContent } from "./content";
 import type { CoverTheme } from "./theme";
 

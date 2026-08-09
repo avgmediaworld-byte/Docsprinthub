@@ -5,7 +5,7 @@
    Version : 1.0.0
 =========================================================== */
 
-import type { ThemeConfiguration } from "../themes/base";
+import type { ThemeConfiguration } from "../data/themes/base";
 
 /* ===========================================================
    Theme Collections
@@ -17,7 +17,7 @@ import {
 
   AcademicThemeCollection,
 
-} from "../themes/academic";
+} from "../data/themes/academic";
 
 import {
 
@@ -25,7 +25,7 @@ import {
 
   CorporateThemeCollection,
 
-} from "../themes/corporate";
+} from "../data/themes/corporate";
 
 import {
 
@@ -33,7 +33,7 @@ import {
 
   SchoolThemeCollection,
 
-} from "../themes/school";
+} from "../data/themes/school";
 
 import {
 
@@ -41,7 +41,7 @@ import {
 
   TechnologyThemeCollection,
 
-} from "../themes/technology";
+} from "../data/themes/technology";
 
 import {
 
@@ -49,7 +49,7 @@ import {
 
   CreativeThemeCollection,
 
-} from "../themes/creative";
+} from "../data/themes/creative";
 
 import {
 
@@ -57,7 +57,7 @@ import {
 
   MinimalThemeCollection,
 
-} from "../themes/minimal";
+} from "../data/themes/minimal";
 
 import {
 
@@ -65,7 +65,7 @@ import {
 
   GradientThemeCollection,
 
-} from "../themes/gradient";
+} from "../data/themes/gradient";
 
 import {
 
@@ -73,7 +73,7 @@ import {
 
   GlassThemeCollection,
 
-} from "../themes/glass";
+} from "../data/themes/glass";
 
 import {
 
@@ -81,7 +81,7 @@ import {
 
   DarkThemeCollection,
 
-} from "../themes/dark";
+} from "../data/themes/dark";
 
 /* ===========================================================
    Theme Categories
@@ -479,19 +479,19 @@ export function getDarkThemes(): ThemeConfiguration[] {
    Search
 =========================================================== */
 
-export function searchThemes(
+  export function searchThemes(
 
-  keyword: string
+    keyword: string
 
-): ThemeConfiguration[] {
+  ): ThemeConfiguration[] {
 
-  const query = keyword.trim().toLowerCase();
+    const query = keyword.trim().toLowerCase();
 
-  if (!query) {
+    if (!query) {
 
-    return [];
+      return [];
 
-  }
+    }
 
   return AllThemes.filter(theme =>
 
@@ -501,6 +501,12 @@ export function searchThemes(
 
   );
 
+}
+
+export function hasTheme(
+  id: string
+): boolean {
+  return ThemeMap.has(id);
 }
 
 /* ===========================================================
@@ -533,6 +539,28 @@ export function getThemeStatistics() {
 
 }
 
+  /* ===========================================================
+    Safe Theme Lookup
+  =========================================================== */
+
+  export function requireTheme(
+    id: string
+  ): ThemeConfiguration {
+
+    const theme = ThemeMap.get(id);
+
+    if (!theme) {
+
+      throw new Error(
+        `Theme '${id}' not found`
+      );
+
+    }
+
+    return theme;
+
+  }
+
 /* ===========================================================
    Theme Registry SDK
 =========================================================== */
@@ -554,6 +582,10 @@ export const ThemeRegistry = {
   getAllThemes,
 
   getThemeById,
+
+  hasTheme,
+
+  requireTheme,
 
   getThemesByCategory,
 

@@ -4,7 +4,7 @@
    Version : 1.0
    =========================================================== */
 
-import { TemplateCategory } from "../types";
+import type { TemplateCategory } from "../types/template";
 
 /* -----------------------------------------------------------
    Category Badge Color

@@ -19,6 +19,8 @@ import {
 
 export type CorporateThemeId =
 
+  | "corporate-blue"
+
   | "executive-pro"
 
   | "blue-corporate"
@@ -293,6 +295,16 @@ export const FinancialReportTheme = createTheme({
 
   variant: "premium",
 
+  mode: "dark",
+
+  layoutId: "corporate01",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "corner-ribbon",
+  ],
+
   palette: {
 
     ...CorporateBaseTheme.palette,
@@ -377,7 +389,7 @@ export const PremiumGoldTheme = createTheme({
 
     ...CorporateBaseTheme.palette,
 
-    primary: "#B45309",
+    primary: "#FEF3C7",
 
     secondary: "#D97706",
 
@@ -491,6 +503,45 @@ export const ConsultingEliteTheme = createTheme({
 
 });
 
+/* Gallery template: production composition */
+export const CorporateBlueTheme = createTheme({
+
+  ...CorporateBaseTheme,
+
+  id: "corporate-blue",
+
+  name: "Corporate Blue",
+
+  mode: "dark",
+
+  variant: "professional",
+
+  layoutId: "corporate01",
+
+  backgroundId: "navy-luxury",
+
+  decorationIds: [
+    "hexagon",
+  ],
+
+  palette: {
+
+    ...CorporateBaseTheme.palette,
+
+    primary: "#DBEAFE",
+
+    secondary: "#60A5FA",
+
+    accent: "#38BDF8",
+
+    text: "#0F172A",
+
+    border: "#93C5FD",
+
+  },
+
+});
+
 /* ===========================================================
    Registry Update
 =========================================================== */
@@ -506,6 +557,8 @@ CorporateThemes.push(
   DarkBusinessTheme,
 
   ConsultingEliteTheme,
+
+  CorporateBlueTheme,
 
 );
 

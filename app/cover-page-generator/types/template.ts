@@ -7,6 +7,8 @@
 
 import type { ThemeCategory, CoverTheme } from "./theme";
 
+export type TemplateCategory = ThemeCategory | "magazine";
+
 /* ===========================================================
    Template Status
 =========================================================== */

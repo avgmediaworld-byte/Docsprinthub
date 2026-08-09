@@ -1,0 +1,58 @@
+"use client";
+
+import { ReactNode } from "react";
+
+interface SubtitleBlockProps {
+  text?: ReactNode;
+
+  description?: ReactNode;
+
+  align?: "left" | "center" | "right";
+
+  textClassName?: string;
+
+  descriptionClassName?: string;
+
+  className?: string;
+}
+
+export default function SubtitleBlock({
+  text,
+
+  description,
+
+  align = "center",
+
+  textClassName = "",
+
+  descriptionClassName = "",
+
+  className = "",
+}: SubtitleBlockProps) {
+  const alignment = {
+    left: "items-start text-left",
+    center: "items-center text-center",
+    right: "items-end text-right",
+  };
+
+  return (
+    <div
+      className={`flex flex-col gap-2 ${alignment[align]} ${className}`}
+    >
+      {/* Subtitle */}
+      <div
+        className={`text-lg font-semibold uppercase tracking-[0.25em] text-slate-600 ${textClassName}`}
+      >
+        {text ?? "Submitted To"}
+      </div>
+
+      {/* Description */}
+      <div
+        className={`max-w-xl text-sm leading-7 text-slate-500 ${descriptionClassName}`}
+      >
+        {description ??
+          "Department of Computer Science & Engineering"}
+      </div>
+    </div>
+  );
+}

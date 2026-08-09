@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "DocSprint Hindi";
+  src: url("/fonts/NotoSansDevanagari-Regular.ttf") format("truetype");
+  font-display: swap;
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

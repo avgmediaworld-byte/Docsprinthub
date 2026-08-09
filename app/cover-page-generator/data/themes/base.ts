@@ -5,11 +5,7 @@
    Version : 3.0
 =========================================================== */
 
-import type {
-
-  CoverTheme,
-
-} from "../types/theme";
+export type CoverTheme = string;
 
 /* ===========================================================
    Theme Mode
@@ -39,7 +35,17 @@ export type ThemeVariant =
 
   | "glass"
 
-  | "premium";
+  | "premium"
+
+  | "creative"
+
+  | "professional"
+
+  | "technology"
+
+  | "dark"
+
+  | "luxury";
 
 /* ===========================================================
    Theme Status
@@ -179,7 +185,7 @@ export interface ThemePalette {
 
 export interface ThemeConfiguration {
 
-  id: CoverTheme;
+  id: string;
 
   name: string;
 
@@ -192,6 +198,12 @@ export interface ThemeConfiguration {
   palette: ThemePalette;
 
   background: ThemeBackground;
+
+  backgroundId?: string;
+
+  layoutId?: string;
+
+  decorationIds?: string[];
 
   border: ThemeBorder;
 
@@ -336,6 +348,14 @@ export const DEFAULT_THEME: ThemeConfiguration = {
   palette: DEFAULT_THEME_PALETTE,
 
   background: DEFAULT_THEME_BACKGROUND,
+
+  backgroundId: "gradient-blue",
+
+  layoutId: "academic01",
+
+  decorationIds: [
+    "wave-top",
+  ],
 
   border: DEFAULT_THEME_BORDER,
 
@@ -753,6 +773,8 @@ export function recommendTheme(
     | "creative"
 
 ): ThemeConfiguration {
+
+  void category;
 
   return DEFAULT_THEME;
 

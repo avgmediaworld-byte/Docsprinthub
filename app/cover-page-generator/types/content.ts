@@ -529,29 +529,29 @@ export function createContent(
       ...builder.student,
     },
 
-    guide: builder.guide,
+    guide: builder.guide ? { name: "", ...builder.guide } : undefined,
 
     project: {
       ...DEFAULT_CONTENT.project,
       ...builder.project,
     },
 
-    company: builder.company,
+    company: builder.company ? { name: "", ...builder.company } : undefined,
 
     certificate: builder.certificate,
 
-    author: builder.author,
+    author: builder.author ? { name: "", ...builder.author } : undefined,
 
     contact: builder.contact,
 
     qr: {
-      ...DEFAULT_CONTENT.qr,
       ...builder.qr,
+      enabled: builder.qr?.enabled ?? DEFAULT_CONTENT.qr?.enabled ?? false,
     },
 
     photo: {
-      ...DEFAULT_CONTENT.photo,
       ...builder.photo,
+      enabled: builder.photo?.enabled ?? DEFAULT_CONTENT.photo?.enabled ?? false,
     },
 
     header: builder.header,
@@ -612,15 +612,17 @@ export function mergeContent(
       ...update.project,
     },
 
-    qr: {
+    qr: base.qr || update.qr ? {
       ...base.qr,
       ...update.qr,
-    },
+      enabled: update.qr?.enabled ?? base.qr?.enabled ?? false,
+    } : undefined,
 
-    photo: {
+    photo: base.photo || update.photo ? {
       ...base.photo,
       ...update.photo,
-    },
+      enabled: update.photo?.enabled ?? base.photo?.enabled ?? false,
+    } : undefined,
 
     customFields:
       update.customFields ??
