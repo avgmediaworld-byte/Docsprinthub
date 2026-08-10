@@ -43,9 +43,9 @@ export default function Home() {
 
       <div className="flex items-center gap-1">
         <Image src="/docsprinthub-logo.png" alt="DocSprintHub logo" width={38} height={38} className="h-9 w-9 object-contain" priority />
-        <h1 className="text-4xl font-bold tracking-tight">
+        <p className="text-4xl font-bold tracking-tight">
          DocSprint<span className="text-blue-600">Hub</span>
-        </h1>
+        </p>
       </div>
       
       <div className="hidden md:flex gap-7 text-lg font-semibold text-gray-700 ml-16">
@@ -58,7 +58,7 @@ export default function Home() {
       <Link href="/help-support" className="hover:text-blue-600 transition">Help & Support</Link>
       </div>
 
-      <button className="ml-auto bg-blue-600 text-white font-semibold px-7 py-3 rounded-xl shadow-md hover:bg-blue-700 hover:shadow-lg transition duration-300">
+      <button className="ml-auto bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-md transition duration-300 hover:bg-blue-700 hover:shadow-lg sm:px-7 sm:text-base">
       Get Started
       </button>
 
@@ -68,12 +68,16 @@ export default function Home() {
     
       <section className="text-center py-6 px-6 bg-gradient-to-b from-blue-100 via-slate-50 to-slate-100">
 
-        <h2 className="text-5xl font-bold text-gray-900">
+        <h1 className="text-4xl font-bold text-gray-900 sm:text-5xl">
         Professional Document & PDF Tools
-        </h2>
+        </h1>
 
         <p className="mt-5 text-xl font italic text-slate-600 max-w-3xl mx-auto">
           Create, Edit & Manage Documents, PDFs and More — All in One Place.
+        </p>
+
+        <p className="mx-auto mt-4 max-w-3xl text-base leading-7 text-slate-700">
+          DocSprintHub helps students and professionals create polished documents online. Use the <Link href="/resume-builder" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">Resume Builder</Link>, <Link href="/cover-page-generator" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">Cover Page Generator</Link>, <Link href="/pdf-tools" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">PDF Tools</Link>, or <Link href="/qr-generator" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">QR Generator</Link>; Letter Writer and Biodata Maker are part of the growing toolkit.
         </p>
 
         <div className="mt-8 flex justify-center gap-4">
