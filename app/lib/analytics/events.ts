@@ -8,6 +8,9 @@ export const ANALYTICS_EVENT_TYPES = [
 
 export type AnalyticsEventType = (typeof ANALYTICS_EVENT_TYPES)[number];
 
+export const ANALYTICS_ENVIRONMENTS = ["development", "preview", "production"] as const;
+export type AnalyticsEnvironment = (typeof ANALYTICS_ENVIRONMENTS)[number];
+
 export type AnalyticsTool =
   | "resume_builder"
   | "cover_page_generator"
@@ -31,4 +34,8 @@ export type AnalyticsEvent = {
 
 export function isAnalyticsEventType(value: unknown): value is AnalyticsEventType {
   return typeof value === "string" && ANALYTICS_EVENT_TYPES.includes(value as AnalyticsEventType);
+}
+
+export function isAnalyticsEnvironment(value: string | undefined): value is AnalyticsEnvironment {
+  return typeof value === "string" && ANALYTICS_ENVIRONMENTS.includes(value as AnalyticsEnvironment);
 }

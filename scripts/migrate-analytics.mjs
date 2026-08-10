@@ -21,10 +21,12 @@ try {
   const requiredTables = ["analytics_events", "analytics_visitors"];
   const requiredIndexes = [
     "analytics_events_occurred_at_idx",
+    "analytics_events_environment_occurred_idx",
     "analytics_events_page_view_idx",
     "analytics_events_tool_idx",
     "analytics_events_visitor_occurred_idx",
   ];
+  const requiredColumns = ["deployment_environment"];
   const tableRows = await sql`
     SELECT table_name
     FROM information_schema.tables
@@ -37,13 +39,21 @@ try {
     WHERE schemaname = 'public' AND indexname IN ${sql(requiredIndexes)}
     ORDER BY indexname
   `;
+  const columnRows = await sql`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'analytics_events' AND column_name IN ${sql(requiredColumns)}
+    ORDER BY column_name
+  `;
   const tables = tableRows.map((row) => row.table_name);
   const indexes = indexRows.map((row) => row.indexname);
+  const columns = columnRows.map((row) => row.column_name);
   const missingTables = requiredTables.filter((name) => !tables.includes(name));
   const missingIndexes = requiredIndexes.filter((name) => !indexes.includes(name));
+  const missingColumns = requiredColumns.filter((name) => !columns.includes(name));
 
-  if (missingTables.length || missingIndexes.length) {
-    throw new Error(`Analytics schema verification failed. Missing tables: ${missingTables.join(", ") || "none"}. Missing indexes: ${missingIndexes.join(", ") || "none"}.`);
+  if (missingTables.length || missingIndexes.length || missingColumns.length) {
+    throw new Error(`Analytics schema verification failed. Missing tables: ${missingTables.join(", ") || "none"}. Missing indexes: ${missingIndexes.join(", ") || "none"}. Missing columns: ${missingColumns.join(", ") || "none"}.`);
   }
 
   console.log(`Analytics schema is ready. Verified tables: ${tables.join(", ")}. Verified indexes: ${indexes.join(", ")}.`);

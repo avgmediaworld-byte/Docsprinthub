@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isAnalyticsConfigured } from "@/app/lib/analytics/database";
+import { analyticsDeploymentEnvironment, isAnalyticsConfigured } from "@/app/lib/analytics/database";
 import { ANALYTICS_VISITOR_COOKIE, ANALYTICS_VISITOR_MAX_AGE, newVisitorId, visitorHash } from "@/app/lib/analytics/identity";
 import { isAnalyticsEventType, type AnalyticsDevice, type AnalyticsEvent, type AnalyticsTool, type AnalyticsTrafficSource } from "@/app/lib/analytics/events";
 import { saveAnalyticsEvent } from "@/app/lib/analytics/storage";
@@ -76,6 +76,7 @@ function safeRegion(value: string | null) {
 
 export async function POST(request: NextRequest) {
   if (!isAnalyticsConfigured() || !validSameOrigin(request)) return noContent();
+  const environment = analyticsDeploymentEnvironment(request.nextUrl.hostname);
 
   try {
     const body = await request.text();
@@ -101,6 +102,7 @@ export async function POST(request: NextRequest) {
 
     await saveAnalyticsEvent({
       visitorHash: visitorHash(visitorId),
+      environment,
       ...event,
       country: safeCountry(request.headers.get("x-vercel-ip-country") ?? request.headers.get("cf-ipcountry")),
       region: safeRegion(request.headers.get("x-vercel-ip-country-region")),

@@ -1,10 +1,11 @@
 import "server-only";
 
 import { analyticsDb } from "./database";
-import type { AnalyticsDevice, AnalyticsEventType, AnalyticsTool, AnalyticsTrafficSource } from "./events";
+import type { AnalyticsDevice, AnalyticsEnvironment, AnalyticsEventType, AnalyticsTool, AnalyticsTrafficSource } from "./events";
 
 export type StoredAnalyticsEvent = {
   visitorHash: string;
+  environment: AnalyticsEnvironment;
   eventType: AnalyticsEventType;
   path: string;
   tool?: AnalyticsTool;
@@ -31,10 +32,10 @@ export async function saveAnalyticsEvent(event: StoredAnalyticsEvent) {
 
     await transaction`
       INSERT INTO analytics_events (
-        visitor_hash, event_type, page_path, tool, template_id, category, action,
+        visitor_hash, deployment_environment, event_type, page_path, tool, template_id, category, action,
         download_format, device_type, traffic_source, country_code, region_code
       ) VALUES (
-        ${event.visitorHash}, ${event.eventType}, ${event.path}, ${event.tool ?? null},
+        ${event.visitorHash}, ${event.environment}, ${event.eventType}, ${event.path}, ${event.tool ?? null},
         ${event.template ?? null}, ${event.category ?? null}, ${event.action ?? null},
         ${event.format ?? null}, ${event.device ?? null}, ${event.source ?? null},
         ${event.country ?? null}, ${event.region ?? null}
@@ -92,11 +93,21 @@ function timezone() {
 export async function getAnalyticsReport(): Promise<AnalyticsReport> {
   const sql = analyticsDb();
   const timeZone = timezone();
+  const productionEnvironment: AnalyticsEnvironment = "production";
   const dayStart = sql`date_trunc('day', NOW() AT TIME ZONE ${timeZone}) AT TIME ZONE ${timeZone}`;
   const thirtyDayStart = sql`(${dayStart} - INTERVAL '29 days')`;
 
   const [summaryRows, dailyRows, pageRows, toolRows, templateRows, categoryRows, actionRows, downloadRows, deviceRows, sourceRows, locationRows] = await Promise.all([
     sql`
+      WITH production_events AS (
+        SELECT visitor_hash, occurred_at
+        FROM analytics_events
+        WHERE deployment_environment = ${productionEnvironment}
+      ), production_visitors AS (
+        SELECT visitor_hash, MIN(occurred_at) AS first_seen_at
+        FROM production_events
+        GROUP BY visitor_hash
+      )
       SELECT
         COUNT(DISTINCT e.visitor_hash) FILTER (WHERE e.occurred_at >= ${dayStart}) AS today,
         COUNT(DISTINCT e.visitor_hash) FILTER (
@@ -111,15 +122,15 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
         COUNT(DISTINCT e.visitor_hash) FILTER (
           WHERE e.occurred_at >= ${thirtyDayStart} AND v.first_seen_at < ${thirtyDayStart}
         ) AS returning_last_30_days
-      FROM analytics_events e
-      JOIN analytics_visitors v ON v.visitor_hash = e.visitor_hash
+      FROM production_events e
+      JOIN production_visitors v ON v.visitor_hash = e.visitor_hash
     `,
     sql`
       WITH daily_visitors AS (
         SELECT DATE(e.occurred_at AT TIME ZONE ${timeZone}) AS day,
                COUNT(DISTINCT e.visitor_hash) AS count
         FROM analytics_events e
-        WHERE e.occurred_at >= (${dayStart} - INTERVAL '6 days')
+        WHERE e.deployment_environment = ${productionEnvironment} AND e.occurred_at >= (${dayStart} - INTERVAL '6 days')
         GROUP BY 1
       )
       SELECT TO_CHAR(day, 'Mon DD') AS label, count
@@ -129,7 +140,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT page_path AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'page_view'
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'page_view'
       GROUP BY page_path
       ORDER BY count DESC, page_path ASC
       LIMIT 10
@@ -137,7 +148,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT tool AS label, COUNT(*) AS count, COUNT(DISTINCT visitor_hash) AS visitors
       FROM analytics_events
-      WHERE tool IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND tool IS NOT NULL
       GROUP BY tool
       ORDER BY count DESC, tool ASC
       LIMIT 10
@@ -145,7 +156,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT template_id AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'template_selected' AND template_id IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'template_selected' AND template_id IS NOT NULL
       GROUP BY template_id
       ORDER BY count DESC, template_id ASC
       LIMIT 10
@@ -153,7 +164,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT category AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'category_selected' AND category IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'category_selected' AND category IS NOT NULL
       GROUP BY category
       ORDER BY count DESC, category ASC
       LIMIT 10
@@ -161,7 +172,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT action AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'tool_selected' AND action IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'tool_selected' AND action IS NOT NULL
       GROUP BY action
       ORDER BY count DESC, action ASC
       LIMIT 10
@@ -170,7 +181,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
       SELECT CONCAT(COALESCE(tool, 'other'), ' / ', COALESCE(download_format, 'download')) AS label,
              COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'download'
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'download'
       GROUP BY tool, download_format
       ORDER BY count DESC, label ASC
       LIMIT 10
@@ -178,14 +189,14 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
     sql`
       SELECT device_type AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'page_view' AND device_type IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'page_view' AND device_type IS NOT NULL
       GROUP BY device_type
       ORDER BY count DESC, device_type ASC
     `,
     sql`
       SELECT traffic_source AS label, COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'page_view' AND traffic_source IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'page_view' AND traffic_source IS NOT NULL
       GROUP BY traffic_source
       ORDER BY count DESC, traffic_source ASC
     `,
@@ -193,7 +204,7 @@ export async function getAnalyticsReport(): Promise<AnalyticsReport> {
       SELECT CONCAT(country_code, CASE WHEN region_code IS NOT NULL THEN ' / ' || region_code ELSE '' END) AS label,
              COUNT(*) AS count
       FROM analytics_events
-      WHERE event_type = 'page_view' AND country_code IS NOT NULL
+      WHERE deployment_environment = ${productionEnvironment} AND event_type = 'page_view' AND country_code IS NOT NULL
       GROUP BY country_code, region_code
       ORDER BY count DESC, label ASC
       LIMIT 10

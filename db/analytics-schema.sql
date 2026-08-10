@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
   id BIGSERIAL PRIMARY KEY,
   visitor_hash CHAR(64) NOT NULL REFERENCES analytics_visitors(visitor_hash) ON DELETE CASCADE,
   occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deployment_environment VARCHAR(16) NOT NULL DEFAULT 'production' CHECK (deployment_environment IN ('development', 'preview', 'production')),
   event_type TEXT NOT NULL CHECK (event_type IN ('page_view', 'tool_selected', 'template_selected', 'category_selected', 'download')),
   page_path VARCHAR(160) NOT NULL,
   tool VARCHAR(40),
@@ -21,7 +22,12 @@ CREATE TABLE IF NOT EXISTS analytics_events (
   region_code VARCHAR(80)
 );
 
+ALTER TABLE analytics_events
+  ADD COLUMN IF NOT EXISTS deployment_environment VARCHAR(16) NOT NULL DEFAULT 'production'
+  CHECK (deployment_environment IN ('development', 'preview', 'production'));
+
 CREATE INDEX IF NOT EXISTS analytics_events_occurred_at_idx ON analytics_events (occurred_at DESC);
+CREATE INDEX IF NOT EXISTS analytics_events_environment_occurred_idx ON analytics_events (deployment_environment, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS analytics_events_visitor_occurred_idx ON analytics_events (visitor_hash, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS analytics_events_page_view_idx ON analytics_events (event_type, page_path);
 CREATE INDEX IF NOT EXISTS analytics_events_tool_idx ON analytics_events (tool, event_type);
