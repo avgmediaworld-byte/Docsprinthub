@@ -205,9 +205,9 @@ export default function Home() {
 
     </div>
 
-    <div className="border-t border-slate-700 mt-4 pt-6">
+    <div className="border-t border-slate-700 mt-4 pt-4">
       <p className="text-center text-gray-100 text-sm">
-        © {new Date().getFullYear()} DocSprintHub. All Rights Reserved.
+        © {new Date().getFullYear()} DocSprintHub · Powered by HP Sons Traders · Made in India
       </p>
     </div>
 

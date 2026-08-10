@@ -78,6 +78,6 @@ export default function HelpSupportPage() {
       </section>
     </section>
 
-    <footer className="bg-slate-900 px-5 py-8 text-white sm:px-8"><div className="mx-auto flex max-w-7xl flex-col gap-4 text-sm sm:flex-row sm:items-center sm:justify-between"><p>© 2026 DocSprintHub · Powered by HP Sons Traders</p><div className="flex flex-wrap gap-x-5 gap-y-2 text-slate-200"><Link href="/">Home</Link><Link href="/resume-builder">Resume Builder</Link><Link href="/pdf-tools">PDF Tools</Link><Link href="/help-support">Help &amp; Support</Link></div></div></footer>
+    <footer className="bg-slate-900 px-5 py-8 text-white sm:px-8"><div className="mx-auto flex max-w-7xl flex-col gap-4 text-sm sm:flex-row sm:items-center sm:justify-between"><p>© 2026 DocSprintHub · Powered by HP Sons Traders · Made in India</p><div className="flex flex-wrap gap-x-5 gap-y-2 text-slate-200"><Link href="/">Home</Link><Link href="/resume-builder">Resume Builder</Link><Link href="/pdf-tools">PDF Tools</Link><Link href="/help-support">Help &amp; Support</Link></div></div></footer>
   </main>;
 }
