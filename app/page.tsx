@@ -72,12 +72,8 @@ export default function Home() {
         Professional Document & PDF Tools
         </h1>
 
-        <p className="mt-5 text-xl font italic text-slate-600 max-w-3xl mx-auto">
-          Create, Edit & Manage Documents, PDFs and More — All in One Place.
-        </p>
-
-        <p className="mx-auto mt-4 max-w-3xl text-base leading-7 text-slate-700">
-          DocSprintHub helps students and professionals create polished documents online. Use the <Link href="/resume-builder" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">Resume Builder</Link>, <Link href="/cover-page-generator" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">Cover Page Generator</Link>, <Link href="/pdf-tools" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">PDF Tools</Link>, or <Link href="/qr-generator" className="font-semibold text-blue-700 hover:text-blue-900 hover:underline">QR Generator</Link>; Letter Writer and Biodata Maker are part of the growing toolkit.
+        <p className="mt-5 text-xl font-italic text-blue-900 max-w-3xl mx-auto">
+          Create Resumes, Cover Pages, PDFs & Documents Online — All in One Place.
         </p>
 
         <div className="mt-8 flex justify-center gap-4">
@@ -100,7 +96,7 @@ export default function Home() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
 
           <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
-            <h3 className="font-semibold">Free to Start</h3>
+            <h3 className="font-semibold">Free to Use</h3>
           </div>
 
           <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
@@ -108,11 +104,11 @@ export default function Home() {
           </div>
 
           <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
-            <h3 className="font-semibold">Mobile Friendly</h3>
+            <h3 className="font-semibold">Works on Mobile</h3>
           </div>
 
           <div className="p-4 rounded-xl border border-blue-200 bg-blue-200">
-            <h3 className="font-semibold">Easy to Use</h3>
+            <h3 className="font-semibold">Simple & Fast</h3>
           </div>
 
         </div>
