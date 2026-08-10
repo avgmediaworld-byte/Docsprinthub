@@ -66,6 +66,12 @@ interface ThemeDrivenCoverProps {
   thumbnail?: boolean;
 }
 
+export interface CoverTemplateSurfaceProps {
+  templateId: string;
+  design?: CoverDesignOverrides;
+  children?: ReactNode;
+}
+
 function isDarkSurface(theme: ThemeConfiguration) {
   return theme.mode === "dark" || theme.backgroundId === "navy-luxury" || theme.backgroundId === "royal-purple";
 }
@@ -82,6 +88,54 @@ function fallbackMonogram(institute: string) {
 
 function resolveTheme(templateId: string): ThemeConfiguration {
   return getThemeById(templateId) ?? getThemeById("academic-frame") ?? DEFAULT_THEME;
+}
+
+export function getCoverTemplatePalette(templateId: string, design?: CoverDesignOverrides) {
+  const baseTheme = resolveTheme(templateId);
+  const curatedDesign = getCuratedTemplateDesign(templateId);
+
+  return {
+    primary: design?.primaryColor ?? curatedDesign?.primaryColor ?? baseTheme.palette.primary,
+    accent: design?.accentColor ?? curatedDesign?.accentColor ?? baseTheme.palette.accent,
+    fontFamily: design?.headingFont ?? curatedDesign?.headingFont ?? baseTheme.typography.headingFont,
+  };
+}
+
+// This is the shared visual layer used by the editable A4 canvas. It keeps a
+// template's own theme, artwork and decorations while allowing its content to
+// be positioned independently in fixed A4 coordinates.
+export function CoverTemplateSurface({ templateId, design, children }: CoverTemplateSurfaceProps) {
+  const baseTheme = resolveTheme(templateId);
+  const curatedDesign = getCuratedTemplateDesign(templateId);
+  const theme: ThemeConfiguration = {
+    ...baseTheme,
+    backgroundId: design?.backgroundId ?? curatedDesign?.backgroundId ?? baseTheme.backgroundId,
+    decorationIds: design?.decorationIds ?? curatedDesign?.decorationIds ?? baseTheme.decorationIds,
+    layoutId: design?.layoutId ?? curatedDesign?.layoutId ?? baseTheme.layoutId,
+    palette: {
+      ...baseTheme.palette,
+      accent: design?.accentColor ?? curatedDesign?.accentColor ?? baseTheme.palette.accent,
+      primary: design?.primaryColor ?? curatedDesign?.primaryColor ?? baseTheme.palette.primary,
+    },
+    typography: {
+      ...baseTheme.typography,
+      headingFont: design?.headingFont ?? curatedDesign?.headingFont ?? baseTheme.typography.headingFont,
+    },
+  };
+  const Background = theme.backgroundId ? getBackgroundComponent(theme.backgroundId) : null;
+  const decorations = (theme.decorationIds ?? []).map((id, index) => {
+    const Decoration = getDecorationComponent(id);
+    return Decoration ? createElement(Decoration, { color: theme.palette.accent, key: `${id}-${index}` }) : null;
+  });
+
+  return (
+    <div className="relative h-full w-full overflow-hidden" style={{ backgroundColor: theme.palette.background, fontFamily: theme.typography.bodyFont }}>
+      {Background ? createElement(Background) : null}
+      <TemplateSignatureArt templateId={templateId} primaryColor={theme.palette.primary} accentColor={theme.palette.accent} />
+      <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">{decorations}</div>
+      {children}
+    </div>
+  );
 }
 
 function CoverLogo({ data, theme, inverted }: { data: AcademicTemplateData; theme: ThemeConfiguration; inverted: boolean }) {

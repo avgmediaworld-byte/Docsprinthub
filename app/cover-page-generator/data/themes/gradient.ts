@@ -114,7 +114,7 @@ export const GradientThemeCollection = {
 
   description:
 
-    "Modern gradient themes inspired by Canva, Adobe Express and premium presentations.",
+    "Modern gradient themes inspired by premium presentations.",
 
   totalThemes: 10,
 
