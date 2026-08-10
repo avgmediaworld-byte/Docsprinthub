@@ -1,35 +1,42 @@
 import Link from "next/link";
 import Image from "next/image";
+import { BookOpen, FileText, Files, PenLine, QrCode, SquareCheck, User } from "lucide-react";
 import { LanguageSelector } from "./components/LanguageProvider";
 export default function Home() {
     const tools = [
     {
-      title: "📄 Resume Builder",
+      title: "Resume Builder",
+      icon: FileText,
       description: "Create professional resumes and download them instantly in PDF format.",
       link: "/resume-builder",
     },
     {
-      title: "✍️ Letter Writer",
+      title: "Letter Writer",
+      icon: PenLine,
       description: "Create ready-to-use letters for jobs, schools, banks and more.",
       link: "/letter-writer",
     },
     {
-      title: "📑 PDF Tools",
+      title: "PDF Tools",
+      icon: Files,
       description: "Merge, compress and organize PDF documents with ease.",
       link: "/pdf-tools",
     },
     {
-      title: "👤 Biodata Maker",
+      title: "Biodata Maker",
+      icon: User,
       description: "Create personal and marriage biodata instantly.",
       link: "/biodata-maker",
     },
     {
-      title: "🔳 QR Generator",
+      title: "QR Generator",
+      icon: QrCode,
       description: "Generate QR codes for links and contact details.",
       link: "/qr-generator",
     },
     {
-      title: "📘 Cover Page Generator",
+      title: "Cover Page Generator",
+      icon: BookOpen,
       description: "Create professional cover pages for assignments, projects and reports.",
       link: "/cover-page-generator",
     },
@@ -72,7 +79,7 @@ export default function Home() {
         Professional Document & PDF Tools
         </h1>
 
-        <p className="mt-5 text-xl font-italic text-blue-900 max-w-3xl mx-auto">
+        <p className="mt-5 text-xl font-bold font-italic text-blue-900 max-w-3xl mx-auto">
           Create Resumes, Cover Pages, PDFs & Documents Online — All in One Place.
         </p>
 
@@ -122,15 +129,16 @@ export default function Home() {
 
         <div className="grid md:grid-cols-3 gap-5">
 
-            {tools.map((tool) => (
-            <Link key={tool.title} href={tool.link}>
+            {tools.map((tool) => {
+            const Icon = tool.icon;
+            return <Link key={tool.title} href={tool.link}>
             <div className="bg-white border border-slate-300 rounded-2xl px-6 pt-4 pb-6 shadow-md hover:shadow-xl hover:-translate-y-2 transition-all duration-300"
               >
-            <h3 className="mb-2 text-center text-lg font-bold text-[#0b1f4d]">{tool.title}</h3>
+            <h3 className="mb-2 text-center text-lg font-bold text-[#0b1f4d]"><Icon aria-hidden="true" className="mr-1.5 inline-block h-5 w-5 align-[-0.15em]" />{tool.title}</h3>
             <p>{tool.description}</p>
              </div>
-            </Link>
-            ))}
+            </Link>;
+            })}
 
         </div>
       </section>
@@ -146,12 +154,12 @@ export default function Home() {
 
           <div className="grid md:grid-cols-3 gap-6">
 
-            <div>✅ Fast & Easy</div>
-            <div>✅ Free Tools</div>
-            <div>✅ Mobile Friendly</div>
-            <div>✅ Secure Processing</div>
-            <div>✅ Hindi & English Documents</div>
-            <div>✅ No Technical Skills Needed</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> Fast & Easy</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> Free Tools</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> Mobile Friendly</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> Secure Processing</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> Hindi & English Documents</div>
+            <div><SquareCheck aria-hidden="true" className="inline-block h-[1em] w-[1em] align-[-0.125em] text-blue-600" /> No Technical Skills Needed</div>
 
           </div>
 

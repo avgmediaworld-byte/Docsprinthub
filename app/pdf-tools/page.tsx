@@ -2,10 +2,13 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ClipboardEvent as ReactClipboardEvent } from "react";
 import JSZip from "jszip";
 import jsPDF from "jspdf";
+import { Check, ClipboardPaste, Copy, Redo2, Scissors, Trash2, Undo2 } from "lucide-react";
 import { degrees, PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
+import type { PDFPageProxy } from "pdfjs-dist";
 import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
 
 type Tool =
@@ -39,7 +42,8 @@ type ToolOption = { id: Tool; title: string; description: string };
 type ToolMenu = "convert" | "organize" | "edit" | "security" | "resize";
 type MetadataFields = { title: string; author: string; subject: string; keywords: string };
 type PdfColor = { red: number; green: number; blue: number };
-type FontPreset = "auto" | "sans" | "serif" | "mono" | "devanagari";
+type FontPreset = "auto" | "arial" | "helvetica" | "timesNewRoman" | "georgia" | "verdana" | "tahoma" | "courierNew" | "trebuchetMs" | "devanagari";
+type TextAlignment = "left" | "center" | "right";
 type EditableTextRun = {
   id: string;
   pageIndex: number;
@@ -50,12 +54,29 @@ type EditableTextRun = {
   width: number;
   height: number;
   fontSize: number;
+  originalFontSize: number;
   fontName: string;
   fontFamily: string;
   fontPreset: FontPreset;
+  originalFontPreset: FontPreset;
+  isBold: boolean;
+  originalIsBold: boolean;
+  isItalic: boolean;
+  originalIsItalic: boolean;
+  isUnderline: boolean;
+  originalIsUnderline: boolean;
+  alignment: TextAlignment;
+  originalAlignment: TextAlignment;
+  matchOriginal: boolean;
   textColor: PdfColor;
+  originalTextColor: PdfColor;
   backgroundColor: PdfColor;
+  originalBackgroundColor: PdfColor;
 };
+type TextRunEditSnapshot = Pick<EditableTextRun, "value" | "fontPreset" | "fontSize" | "isBold" | "isItalic" | "isUnderline" | "alignment" | "matchOriginal" | "textColor" | "backgroundColor">;
+type TextEditHistory = { runId: string | null; snapshots: TextRunEditSnapshot[]; position: number };
+type ToolbarPosition = { runId: string | null; left: number };
+type TextInputSelection = { start: number; end: number; text: string };
 type EditablePdfPage = {
   pageIndex: number;
   imageUrl: string;
@@ -155,9 +176,14 @@ function usesDevanagariFont(run: Pick<EditableTextRun, "original" | "value" | "f
 
 function editorPreviewFont(run: EditableTextRun) {
   if (usesDevanagariFont(run)) return '"DocSprint Hindi", "Noto Sans Devanagari", Mangal, "Nirmala UI", sans-serif';
-  if (run.fontPreset === "serif") return "serif";
-  if (run.fontPreset === "mono") return "monospace";
-  if (run.fontPreset === "sans") return "sans-serif";
+  if (run.fontPreset === "arial") return "Arial, Helvetica, sans-serif";
+  if (run.fontPreset === "helvetica") return "Helvetica, Arial, sans-serif";
+  if (run.fontPreset === "timesNewRoman") return '"Times New Roman", Times, serif';
+  if (run.fontPreset === "georgia") return "Georgia, 'Times New Roman', serif";
+  if (run.fontPreset === "verdana") return "Verdana, Arial, sans-serif";
+  if (run.fontPreset === "tahoma") return "Tahoma, Arial, sans-serif";
+  if (run.fontPreset === "courierNew") return '"Courier New", Courier, monospace';
+  if (run.fontPreset === "trebuchetMs") return '"Trebuchet MS", Arial, sans-serif';
   return run.fontFamily;
 }
 
@@ -195,6 +221,75 @@ function hexToColor(value: string, fallback: PdfColor) {
     green: Number.parseInt(match[1].slice(2, 4), 16),
     blue: Number.parseInt(match[1].slice(4, 6), 16),
   };
+}
+
+function colorsMatch(first: PdfColor, second: PdfColor) {
+  return first.red === second.red && first.green === second.green && first.blue === second.blue;
+}
+
+function isBoldFontDescriptor(descriptor: string) {
+  return /bold|black|semi.?bold|demi/.test(descriptor);
+}
+
+function isItalicFontDescriptor(descriptor: string) {
+  return /italic|oblique/.test(descriptor);
+}
+
+function textRunEditSnapshot(run: EditableTextRun): TextRunEditSnapshot {
+  return {
+    value: run.value,
+    fontPreset: run.fontPreset,
+    fontSize: run.fontSize,
+    isBold: run.isBold,
+    isItalic: run.isItalic,
+    isUnderline: run.isUnderline,
+    alignment: run.alignment,
+    matchOriginal: run.matchOriginal,
+    textColor: run.textColor,
+    backgroundColor: run.backgroundColor,
+  };
+}
+
+function originalTextRunSnapshot(run: EditableTextRun): TextRunEditSnapshot {
+  return {
+    value: run.original,
+    fontPreset: run.originalFontPreset,
+    fontSize: run.originalFontSize,
+    isBold: run.originalIsBold,
+    isItalic: run.originalIsItalic,
+    isUnderline: run.originalIsUnderline,
+    alignment: run.originalAlignment,
+    matchOriginal: true,
+    textColor: run.originalTextColor,
+    backgroundColor: run.originalBackgroundColor,
+  };
+}
+
+function snapshotsMatch(first: TextRunEditSnapshot, second: TextRunEditSnapshot) {
+  return first.value === second.value
+    && first.fontPreset === second.fontPreset
+    && first.fontSize === second.fontSize
+    && first.isBold === second.isBold
+    && first.isItalic === second.isItalic
+    && first.isUnderline === second.isUnderline
+    && first.alignment === second.alignment
+    && first.matchOriginal === second.matchOriginal
+    && colorsMatch(first.textColor, second.textColor)
+    && colorsMatch(first.backgroundColor, second.backgroundColor);
+}
+
+function textRunHasChanges(run: EditableTextRun) {
+  const current = textRunEditSnapshot(run);
+  const original = originalTextRunSnapshot(run);
+  return current.value !== original.value
+    || current.fontPreset !== original.fontPreset
+    || current.fontSize !== original.fontSize
+    || current.isBold !== original.isBold
+    || current.isItalic !== original.isItalic
+    || current.isUnderline !== original.isUnderline
+    || current.alignment !== original.alignment
+    || !colorsMatch(current.textColor, original.textColor)
+    || !colorsMatch(current.backgroundColor, original.backgroundColor);
 }
 
 function colorDistance(first: PdfColor, second: PdfColor) {
@@ -313,6 +408,32 @@ async function loadPdfJs() {
   return pdfjs;
 }
 
+type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
+
+async function readPdfTextContent(page: PDFPageProxy): Promise<PdfTextContent> {
+  const reader = page.streamTextContent().getReader();
+  const textContent: PdfTextContent = {
+    items: [],
+    styles: Object.create(null),
+    lang: null,
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      textContent.lang ??= value.lang;
+      Object.assign(textContent.styles, value.styles);
+      textContent.items.push(...value.items);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return textContent;
+}
+
 function fileKey(file: File) {
   return `${file.name}-${file.size}-${file.lastModified}`;
 }
@@ -406,7 +527,7 @@ async function extractPdfText(file: File, password = "") {
   const textPages: string[] = [];
   try {
     for (let number = 1; number <= pdf.numPages; number += 1) {
-      const content = await (await pdf.getPage(number)).getTextContent();
+      const content = await readPdfTextContent(await pdf.getPage(number));
       textPages.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" ").replace(/\s+/g, " ").trim());
     }
   } finally {
@@ -425,7 +546,7 @@ async function getEditableTextRuns(sourceBytes: Uint8Array) {
   try {
     for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
       const page = await pdf.getPage(pageIndex + 1);
-      const content = await page.getTextContent();
+      const content = await readPdfTextContent(page);
       const pageRuns: EditableTextRun[] = [];
       content.items.forEach((item, itemIndex) => {
         if (!("str" in item) || !item.str.trim()) return;
@@ -437,6 +558,7 @@ async function getEditableTextRuns(sourceBytes: Uint8Array) {
         if (Math.abs(b) > 0.01 || Math.abs(c) > 0.01) return;
 
         const fontSize = Math.max(4, Math.round(Math.abs(d || a || item.height || 12) * 10) / 10);
+        const fontDescriptor = `${item.fontName} ${style?.fontFamily ?? ""}`.toLowerCase();
         pageRuns.push({
           id: `${pageIndex}-${itemIndex}`,
           pageIndex,
@@ -447,11 +569,24 @@ async function getEditableTextRuns(sourceBytes: Uint8Array) {
           width: Math.max(1, item.width),
           height: Math.max(fontSize, item.height || fontSize),
           fontSize,
+          originalFontSize: fontSize,
           fontName: item.fontName,
           fontFamily: style?.fontFamily || item.fontName,
           fontPreset: "auto",
+          originalFontPreset: "auto",
+          isBold: isBoldFontDescriptor(fontDescriptor),
+          originalIsBold: isBoldFontDescriptor(fontDescriptor),
+          isItalic: isItalicFontDescriptor(fontDescriptor),
+          originalIsItalic: isItalicFontDescriptor(fontDescriptor),
+          isUnderline: false,
+          originalIsUnderline: false,
+          alignment: "left",
+          originalAlignment: "left",
+          matchOriginal: true,
           textColor: defaultTextColor,
+          originalTextColor: defaultTextColor,
           backgroundColor: defaultBackgroundColor,
+          originalBackgroundColor: defaultBackgroundColor,
         });
       });
       const viewport = page.getViewport({ scale: appearanceScale });
@@ -461,7 +596,13 @@ async function getEditableTextRuns(sourceBytes: Uint8Array) {
       const context = canvas.getContext("2d", { willReadFrequently: true });
       if (!context) throw new Error("The browser canvas could not be started.");
       await page.render({ canvas, canvasContext: context, viewport }).promise;
-      pageRuns.forEach((run) => Object.assign(run, sampleRunAppearance(context, run, appearanceScale)));
+      pageRuns.forEach((run) => {
+        const appearance = sampleRunAppearance(context, run, appearanceScale);
+        Object.assign(run, appearance, {
+          originalTextColor: appearance.textColor,
+          originalBackgroundColor: appearance.backgroundColor,
+        });
+      });
       runs.push(...pageRuns);
     }
   } finally {
@@ -473,8 +614,8 @@ async function getEditableTextRuns(sourceBytes: Uint8Array) {
 
 function matchingStandardFont(run: EditableTextRun) {
   const descriptor = run.fontPreset === "auto" ? `${run.fontName} ${run.fontFamily}`.toLowerCase() : run.fontPreset;
-  const isBold = /bold|black|semi.?bold|demi/.test(descriptor);
-  const isItalic = /italic|oblique/.test(descriptor);
+  const isBold = run.isBold || isBoldFontDescriptor(descriptor);
+  const isItalic = run.isItalic || isItalicFontDescriptor(descriptor);
 
   if (/courier|mono/.test(descriptor)) {
     if (isBold && isItalic) return StandardFonts.CourierBoldOblique;
@@ -637,6 +778,8 @@ export default function PdfToolsPage() {
   const [editableTextRuns, setEditableTextRuns] = useState<EditableTextRun[]>([]);
   const [editablePdfPages, setEditablePdfPages] = useState<EditablePdfPage[]>([]);
   const [selectedTextRunId, setSelectedTextRunId] = useState<string | null>(null);
+  const [textEditHistory, setTextEditHistory] = useState<TextEditHistory>({ runId: null, snapshots: [], position: -1 });
+  const [toolbarPosition, setToolbarPosition] = useState<ToolbarPosition>({ runId: null, left: 0 });
   const [textEditorQuery, setTextEditorQuery] = useState("");
   const [isTextEditorLoading, setIsTextEditorLoading] = useState(false);
   const [password, setPassword] = useState("");
@@ -653,6 +796,10 @@ export default function PdfToolsPage() {
   const toolMenuRef = useRef<HTMLElement | null>(null);
   const workingEditorPdfBytes = useRef<Uint8Array | null>(null);
   const editorPageRefs = useRef<Record<number, HTMLElement | null>>({});
+  const editorCanvasRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const activeTextEditorRef = useRef<HTMLDivElement | null>(null);
+  const activeTextInputRef = useRef<HTMLInputElement | null>(null);
+  const activeToolbarRef = useRef<HTMLDivElement | null>(null);
 
   const activeDetails = toolOptions.find((tool) => tool.id === activeTool) ?? toolOptions[0];
   const usesConvertLayout = ["pdfToImage", "imageToPdf", "word", "excel", "ocr", "wordToPdf", "excelToPdf", "powerpointToPdf", "pdfToPowerpoint"].includes(activeTool);
@@ -686,8 +833,38 @@ export default function PdfToolsPage() {
     return query ? editableTextRuns.filter((run) => run.original.toLowerCase().includes(query) || run.value.toLowerCase().includes(query)) : editableTextRuns;
   }, [editableTextRuns, textEditorQuery]);
   const matchingTextRunIds = useMemo(() => new Set(visibleTextRuns.map((run) => run.id)), [visibleTextRuns]);
-  const changedTextRuns = useMemo(() => editableTextRuns.filter((run) => run.value !== run.original), [editableTextRuns]);
+  const changedTextRuns = useMemo(() => editableTextRuns.filter(textRunHasChanges), [editableTextRuns]);
   const textChangeCount = changedTextRuns.length;
+
+  useLayoutEffect(() => {
+    if (!selectedTextRun) return;
+    const container = editorCanvasRefs.current[selectedTextRun.pageIndex];
+    const editor = activeTextEditorRef.current;
+    const toolbar = activeToolbarRef.current;
+    if (!container || !editor || !toolbar) return;
+
+    const positionToolbar = () => {
+      const containerRect = container.getBoundingClientRect();
+      const editorRect = editor.getBoundingClientRect();
+      const toolbarWidth = toolbar.getBoundingClientRect().width;
+      const editorLeft = editorRect.left - containerRect.left;
+      const maximumLeft = Math.max(0, containerRect.width - toolbarWidth - 1);
+      const toolbarLeft = toolbarWidth >= containerRect.width
+        ? Math.max(0, (containerRect.width - toolbarWidth) / 2)
+        : Math.min(Math.max(editorLeft, 0), maximumLeft);
+      const relativeLeft = toolbarLeft - editorLeft;
+
+      setToolbarPosition((current) => current.runId === selectedTextRun.id && Math.abs(current.left - relativeLeft) < 0.5
+        ? current
+        : { runId: selectedTextRun.id, left: relativeLeft });
+    };
+
+    positionToolbar();
+    const resizeObserver = new ResizeObserver(positionToolbar);
+    resizeObserver.observe(container);
+    resizeObserver.observe(toolbar);
+    return () => resizeObserver.disconnect();
+  }, [selectedTextRun?.id, selectedTextRun?.pageIndex]);
 
   useEffect(() => {
     if (activeTool === "textEdit") return;
@@ -765,6 +942,9 @@ export default function PdfToolsPage() {
         setEditableTextRuns(runs);
         setEditablePdfPages(renderedPages);
         setSelectedTextRunId(runs[0]?.id ?? null);
+        setTextEditHistory(runs[0]
+          ? { runId: runs[0].id, snapshots: [textRunEditSnapshot(runs[0])], position: 0 }
+          : { runId: null, snapshots: [], position: -1 });
       } catch (caughtError) {
         if (!cancelled) setError(caughtError instanceof Error ? caughtError.message : "The PDF text could not be read.");
       } finally {
@@ -815,6 +995,39 @@ export default function PdfToolsPage() {
     };
   }, [openMenu]);
 
+  useEffect(() => {
+    if (!selectedTextRunId) return;
+
+    const finishOnOutsidePointerDown = (event: PointerEvent) => {
+      if (activeTextEditorRef.current?.contains(event.target as Node)) return;
+      setSelectedTextRunId(null);
+    };
+    const handleEditorKeyboardShortcut = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSelectedTextRunId(null);
+        return;
+      }
+      if ((!event.ctrlKey && !event.metaKey) || document.activeElement !== activeTextInputRef.current) return;
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoTextRunEdit(selectedTextRunId);
+        else undoTextRunEdit(selectedTextRunId);
+      } else if (key === "y") {
+        event.preventDefault();
+        redoTextRunEdit(selectedTextRunId);
+      }
+    };
+
+    document.addEventListener("pointerdown", finishOnOutsidePointerDown, true);
+    document.addEventListener("keydown", handleEditorKeyboardShortcut);
+    return () => {
+      document.removeEventListener("pointerdown", finishOnOutsidePointerDown, true);
+      document.removeEventListener("keydown", handleEditorKeyboardShortcut);
+    };
+  }, [selectedTextRunId, textEditHistory]);
+
   function toggleMenu(menu: ToolMenu) {
     setOpenMenu((current) => current === menu ? null : menu);
   }
@@ -832,6 +1045,7 @@ export default function PdfToolsPage() {
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setSelectedTextRunId(null);
+    setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setTextEditorQuery("");
     setIsTextEditorLoading(false);
     setIsPreparingFiles(false);
@@ -843,16 +1057,159 @@ export default function PdfToolsPage() {
     setStatus("");
   }
 
+  function startTextRunEdit(id: string) {
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (!run) return;
+    setSelectedTextRunId(id);
+    setTextEditHistory({ runId: id, snapshots: [textRunEditSnapshot(run)], position: 0 });
+  }
+
+  function updateTextRunState(id: string, updates: Partial<TextRunEditSnapshot>) {
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (!run) return;
+    const nextRun = { ...run, ...updates };
+    const nextSnapshot = textRunEditSnapshot(nextRun);
+    if (snapshotsMatch(textRunEditSnapshot(run), nextSnapshot)) return;
+
+    setEditableTextRuns((current) => current.map((item) => item.id === id ? nextRun : item));
+    setTextEditHistory((current) => {
+      if (current.runId !== id || current.position < 0) {
+        return { runId: id, snapshots: [textRunEditSnapshot(run), nextSnapshot], position: 1 };
+      }
+      if (snapshotsMatch(current.snapshots[current.position], nextSnapshot)) return current;
+      return {
+        runId: id,
+        snapshots: [...current.snapshots.slice(0, current.position + 1), nextSnapshot],
+        position: current.position + 1,
+      };
+    });
+  }
+
   function updateTextRun(id: string, value: string) {
-    setEditableTextRuns((current) => current.map((run) => run.id === id ? { ...run, value } : run));
+    updateTextRunState(id, { value });
+  }
+
+  function selectedInputText(id: string): TextInputSelection | null {
+    const input = activeTextInputRef.current;
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (!input || input.dataset.textRunId !== id || !run) return null;
+    const start = Math.min(input.selectionStart ?? 0, run.value.length);
+    const end = Math.min(input.selectionEnd ?? start, run.value.length);
+    return { start, end, text: run.value.slice(start, end) };
+  }
+
+  function replaceSelectedInputText(id: string, replacement: string, selection = selectedInputText(id)) {
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (!run || !selection) return false;
+    const value = `${run.value.slice(0, selection.start)}${replacement}${run.value.slice(selection.end)}`;
+    const cursorPosition = selection.start + replacement.length;
+    updateTextRun(id, value);
+    requestAnimationFrame(() => {
+      const input = activeTextInputRef.current;
+      if (!input || input.dataset.textRunId !== id) return;
+      input.focus();
+      input.setSelectionRange(cursorPosition, cursorPosition);
+    });
+    return true;
+  }
+
+  function handleInputCopy(event: ReactClipboardEvent<HTMLInputElement>, id: string) {
+    const selection = selectedInputText(id);
+    if (!selection?.text) return;
+    event.clipboardData.setData("text/plain", selection.text);
+    event.preventDefault();
+  }
+
+  function handleInputCut(event: ReactClipboardEvent<HTMLInputElement>, id: string) {
+    const selection = selectedInputText(id);
+    if (!selection?.text) return;
+    event.clipboardData.setData("text/plain", selection.text);
+    event.preventDefault();
+    replaceSelectedInputText(id, "", selection);
+  }
+
+  function handleInputPaste(event: ReactClipboardEvent<HTMLInputElement>, id: string) {
+    const pastedText = event.clipboardData.getData("text/plain");
+    if (!pastedText) return;
+    event.preventDefault();
+    replaceSelectedInputText(id, pastedText);
+  }
+
+  async function copySelectedInputText(id: string) {
+    const selection = selectedInputText(id);
+    if (!selection?.text || !navigator.clipboard?.writeText) return false;
+    try {
+      await navigator.clipboard.writeText(selection.text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function cutSelectedInputText(id: string) {
+    const selection = selectedInputText(id);
+    if (!selection?.text || !navigator.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(selection.text);
+      replaceSelectedInputText(id, "", selection);
+    } catch {
+      // Clipboard permissions are handled by the browser; leave text unchanged if writing is denied.
+    }
+  }
+
+  async function pasteIntoSelectedInput(id: string) {
+    const selection = selectedInputText(id);
+    if (!selection || !navigator.clipboard?.readText) return;
+    try {
+      const pastedText = await navigator.clipboard.readText();
+      if (pastedText) replaceSelectedInputText(id, pastedText, selection);
+    } catch {
+      // Clipboard permissions are handled by the browser; leave text unchanged if reading is denied.
+    }
+  }
+
+  function deleteTextRun(id: string) {
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (run) updateTextRun(id, "");
   }
 
   function updateTextRunAppearance(id: string, updates: Partial<Pick<EditableTextRun, "fontPreset" | "fontSize" | "textColor" | "backgroundColor">>) {
-    setEditableTextRuns((current) => current.map((run) => run.id === id ? { ...run, ...updates } : run));
+    updateTextRunState(id, { ...updates, matchOriginal: false });
+  }
+
+  function updateTextRunFormatting(id: string, updates: Pick<TextRunEditSnapshot, "isBold" | "isItalic" | "isUnderline" | "alignment">) {
+    updateTextRunState(id, { ...updates, matchOriginal: false });
+  }
+
+  function setMatchOriginal(id: string, enabled: boolean) {
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (!run) return;
+    updateTextRunState(id, enabled ? { ...originalTextRunSnapshot(run), value: run.value } : { matchOriginal: false });
+  }
+
+  function undoTextRunEdit(id: string) {
+    if (textEditHistory.runId !== id || textEditHistory.position <= 0) return;
+    const position = textEditHistory.position - 1;
+    const snapshot = textEditHistory.snapshots[position];
+    setEditableTextRuns((current) => current.map((run) => run.id === id ? { ...run, ...snapshot } : run));
+    setTextEditHistory((current) => ({ ...current, position }));
+  }
+
+  function redoTextRunEdit(id: string) {
+    if (textEditHistory.runId !== id || textEditHistory.position >= textEditHistory.snapshots.length - 1) return;
+    const position = textEditHistory.position + 1;
+    const snapshot = textEditHistory.snapshots[position];
+    setEditableTextRuns((current) => current.map((run) => run.id === id ? { ...run, ...snapshot } : run));
+    setTextEditHistory((current) => ({ ...current, position }));
   }
 
   function discardTextRunChange(id: string) {
-    setEditableTextRuns((current) => current.map((run) => run.id === id ? { ...run, value: run.original } : run));
+    const run = editableTextRuns.find((item) => item.id === id);
+    if (run) updateTextRunState(id, originalTextRunSnapshot(run));
+  }
+
+  function finishTextRunEdit() {
+    setSelectedTextRunId(null);
   }
 
   function scrollToEditorPage(pageIndex: number) {
@@ -865,6 +1222,7 @@ export default function PdfToolsPage() {
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setSelectedTextRunId(null);
+    setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setIsTextEditorLoading(false);
     setIsPreparingFiles(false);
     workingEditorPdfBytes.current = null;
@@ -882,6 +1240,7 @@ export default function PdfToolsPage() {
       setEditableTextRuns([]);
       setEditablePdfPages([]);
       setSelectedTextRunId(null);
+      setTextEditHistory({ runId: null, snapshots: [], position: -1 });
       setIsTextEditorLoading(false);
       setIsPreparingFiles(false);
       workingEditorPdfBytes.current = null;
@@ -908,6 +1267,7 @@ export default function PdfToolsPage() {
         setEditableTextRuns([]);
         setEditablePdfPages([]);
         setSelectedTextRunId(null);
+        setTextEditHistory({ runId: null, snapshots: [], position: -1 });
         workingEditorPdfBytes.current = null;
       }
       setFiles((current) => (allowsMultiple ? [...current, ...added] : [added[0]]));
@@ -1105,10 +1465,24 @@ export default function PdfToolsPage() {
               height: Math.min(page.getHeight() - Math.max(0, run.y - run.height * 0.3), run.height * 1.25),
               color: pdfColor(run.backgroundColor),
             });
-            let textX = run.x;
+            const alignmentOffset = run.alignment === "center"
+              ? (coverWidth - replacementWidth) / 2
+              : run.alignment === "right"
+                ? coverWidth - replacementWidth - 2
+                : 0;
+            let textX = Math.max(0, run.x + alignmentOffset);
             for (const segment of fontSegments) {
               page.drawText(segment.text, { x: textX, y: run.y, size: run.fontSize, font: segment.font, color: pdfColor(run.textColor) });
               textX += segment.font.widthOfTextAtSize(segment.text, run.fontSize);
+            }
+            if (run.isUnderline && replacementWidth > 0) {
+              const underlineY = Math.max(0, run.y - Math.max(0.75, run.fontSize * 0.12));
+              page.drawLine({
+                start: { x: Math.max(0, run.x + alignmentOffset), y: underlineY },
+                end: { x: Math.min(page.getWidth(), run.x + alignmentOffset + replacementWidth), y: underlineY },
+                thickness: Math.max(0.5, run.fontSize / 16),
+                color: pdfColor(run.textColor),
+              });
             }
           } catch (caughtError) {
             const message = caughtError instanceof Error ? caughtError.message : "The replacement text could not be written.";
@@ -1121,7 +1495,20 @@ export default function PdfToolsPage() {
         downloadPdf(savedBytes, outputName(sourceFile.name, "text-corrected"));
         const refreshedPages = await renderEditablePdfPages(savedBytes);
         setEditablePdfPages(refreshedPages);
-        setEditableTextRuns((current) => current.map((run) => ({ ...run, original: run.value })));
+        setEditableTextRuns((current) => current.map((run) => ({
+          ...run,
+          original: run.value,
+          originalFontPreset: run.fontPreset,
+          originalFontSize: run.fontSize,
+          originalIsBold: run.isBold,
+          originalIsItalic: run.isItalic,
+          originalIsUnderline: run.isUnderline,
+          originalAlignment: run.alignment,
+          originalTextColor: run.textColor,
+          originalBackgroundColor: run.backgroundColor,
+          matchOriginal: true,
+        })));
+        setTextEditHistory({ runId: null, snapshots: [], position: -1 });
         completeSuccessfulDownload(`${changedRuns.length} text correction${changedRuns.length === 1 ? "" : "s"} was saved and removed from the change history.`);
         return;
       }
@@ -1371,7 +1758,7 @@ export default function PdfToolsPage() {
         </div>
       </nav>
 
-      <section className={activeTool === "textEdit" && files.length ? "w-full px-3 py-4 sm:px-5" : "w-full px-3 py-5 sm:px-5 sm:py-7"}>
+      <section className={activeTool === "textEdit" && files.length ? "w-auto px-3 py-4 sm:px-5" : "w-full px-3 py-5 sm:px-5 sm:py-7"}>
 
         <section className={`relative min-w-0 bg-white ${activeTool === "textEdit" && files.length ? "" : "rounded-2xl border border-slate-200 p-5 shadow-sm sm:p-8"}`}>
           <div className={activeTool === "textEdit" ? "" : "grid min-w-0 grid-cols-[minmax(0,1fr)_20rem] gap-5"} style={activeTool === "textEdit" ? undefined : { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 20rem", gap: "1.25rem" }}>
@@ -1506,13 +1893,13 @@ export default function PdfToolsPage() {
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3"><div><h3 className="font-bold text-slate-950">PDF pages</h3><p className="mt-1 text-xs text-slate-600">Click a line to edit it directly; its colour and background are sampled automatically.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{editablePdfPages.length} pages - {editableTextRuns.length} text items</span></div>
                 <div className="max-h-[calc(100vh-15.5rem)] min-h-[34rem] overflow-y-auto overscroll-contain p-3 sm:p-5">
                   {editablePdfPages.map((page) => <article key={page.pageIndex} ref={(element) => { editorPageRefs.current[page.pageIndex] = element; }} className="mx-auto mb-8 w-full max-w-[58rem] scroll-mt-5 last:mb-0">
-                    <div className="relative rounded-lg bg-white shadow-md [container-type:inline-size]">
+                    <div ref={(element) => { editorCanvasRefs.current[page.pageIndex] = element; }} className="relative rounded-lg bg-white shadow-md [container-type:inline-size]">
                       <img src={page.imageUrl} alt={`PDF page ${page.pageIndex + 1}`} className="block h-auto w-full select-none rounded-lg" draggable={false} />
                       <div className="absolute inset-0">
                         {editableTextRuns.filter((run) => run.pageIndex === page.pageIndex).map((run) => {
                           const isSelected = selectedTextRunId === run.id;
                           const isSearchMatch = textEditorQuery.trim().length > 0 && matchingTextRunIds.has(run.id);
-                          const isChanged = run.value !== run.original;
+                          const isChanged = textRunHasChanges(run);
                           const previewFontFamily = editorPreviewFont(run);
                           const left = Math.max(0, (run.x / page.width) * 100);
                           const top = Math.max(0, ((page.height - run.y - run.height) / page.height) * 100);
@@ -1521,14 +1908,27 @@ export default function PdfToolsPage() {
                           const estimatedReplacementWidth = Math.max(run.width, (run.value.length + 0.45) * run.fontSize * 0.62);
                           const previewWidth = isSelected || isChanged ? Math.min(100 - left, Math.max(width, (estimatedReplacementWidth / page.width) * 100)) : width;
                           const runStyle = { left: `${left}%`, top: `${top}%`, width: `${previewWidth}%`, height: `${height}%` };
-                          return <div key={run.id} className="absolute" style={runStyle}>
-                            {isSelected && <input aria-label={`Edit page ${run.pageIndex + 1} text`} lang={usesDevanagariFont(run) ? "hi" : undefined} autoFocus value={run.value} onInput={(event) => updateTextRun(run.id, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") setSelectedTextRunId(null); if (event.key === "Escape") { discardTextRunChange(run.id); setSelectedTextRunId(null); } }} className="absolute inset-0 z-20 min-w-0 rounded-sm border-0 px-0 outline-none ring-2 ring-blue-600" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, lineHeight: 1.1 }} />}
-                            {!isSelected && isChanged && <input aria-hidden="true" readOnly tabIndex={-1} value={run.value} className="pointer-events-none absolute inset-0 z-[1] min-w-0 rounded-sm border-0 px-0 outline-none" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, lineHeight: 1.1 }} />}
-                            <button type="button" aria-label={`Edit page ${run.pageIndex + 1} text: ${run.value || run.original}`} title={`Click to edit: ${run.value || run.original}`} onClick={() => setSelectedTextRunId(run.id)} className={`absolute inset-0 z-10 cursor-text appearance-none rounded-sm bg-transparent p-0 text-transparent outline-none transition focus:ring-2 focus:ring-blue-300 ${isSelected ? "pointer-events-none" : isSearchMatch ? "bg-amber-300/20 ring-1 ring-amber-500" : "hover:bg-blue-300/15 hover:ring-1 hover:ring-blue-500"}`} />
-                            {isSelected && <div className="absolute z-20 w-[min(21rem,86cqw)] rounded-lg border border-blue-200 bg-white p-2 shadow-xl" style={{ left: "0", top: "calc(100% + 8px)" }} onClick={(event) => event.stopPropagation()}>
-                              <div className="flex items-center justify-between gap-2"><p className="text-sm font-semibold text-slate-800">Editing this line</p><div className="flex items-center gap-2"><button type="button" onClick={() => discardTextRunChange(run.id)} disabled={run.value === run.original} className="rounded-md px-2 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">Undo</button><button type="button" onClick={() => setSelectedTextRunId(null)} className="rounded-md bg-blue-600 px-2 py-1.5 text-xs font-bold text-white hover:bg-blue-700">Done</button></div></div>
-                              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-600"><label className="min-w-0"><span className="mb-1 block font-semibold">Font</span><select aria-label="Font style" value={run.fontPreset} onChange={(event) => updateTextRunAppearance(run.id, { fontPreset: event.target.value as FontPreset })} className="w-full rounded border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600"><option value="auto">Auto detected</option><option value="devanagari">Hindi / Devanagari</option><option value="sans">Sans-serif</option><option value="serif">Serif</option><option value="mono">Monospace</option></select></label><label><span className="mb-1 block font-semibold">Size (pt)</span><input aria-label="Font size" type="number" min="4" max="96" step="0.1" value={run.fontSize} onChange={(event) => updateTextRunAppearance(run.id, { fontSize: Math.max(4, Math.min(96, Number(event.target.value) || run.fontSize)) })} className="w-full rounded border border-slate-300 px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600" /></label><label><span className="mb-1 block font-semibold">Text colour</span><input aria-label="Text colour" type="color" value={colorToHex(run.textColor)} onChange={(event) => updateTextRunAppearance(run.id, { textColor: hexToColor(event.target.value, run.textColor) })} className="h-7 w-full cursor-pointer rounded border border-slate-300 bg-white p-0.5" /></label><label><span className="mb-1 block font-semibold">Background</span><input aria-label="Background colour" type="color" value={colorToHex(run.backgroundColor)} onChange={(event) => updateTextRunAppearance(run.id, { backgroundColor: hexToColor(event.target.value, run.backgroundColor) })} className="h-7 w-full cursor-pointer rounded border border-slate-300 bg-white p-0.5" /></label></div>
-                              <p className="mt-1.5 text-[11px] text-slate-500">{usesDevanagariFont(run) ? "Hindi text is using the embedded Devanagari font." : `Auto-detected: ${run.fontFamily} - ${run.fontSize}pt. Colours are sampled from this line's PDF pixels.`}</p>
+                          return <div key={run.id} ref={isSelected ? activeTextEditorRef : undefined} className="absolute" style={runStyle}>
+                            {isSelected && <input ref={activeTextInputRef} data-text-run-id={run.id} aria-label={`Edit page ${run.pageIndex + 1} text`} lang={usesDevanagariFont(run) ? "hi" : undefined} autoFocus value={run.value} onInput={(event) => updateTextRun(run.id, event.currentTarget.value)} onCopy={(event) => handleInputCopy(event, run.id)} onCut={(event) => handleInputCut(event, run.id)} onPaste={(event) => handleInputPaste(event, run.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === "Escape") { event.preventDefault(); finishTextRunEdit(); return; } if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteTextRun(run.id); return; } if (event.ctrlKey || event.metaKey) { const key = event.key.toLowerCase(); if (key === "x") { event.preventDefault(); void cutSelectedInputText(run.id); } else if (key === "c") { event.preventDefault(); void copySelectedInputText(run.id); } else if (key === "v") { event.preventDefault(); void pasteIntoSelectedInput(run.id); } } }} className="absolute inset-0 z-20 min-w-0 rounded-sm border-0 px-0 outline-none ring-2 ring-blue-600" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
+                            {!isSelected && isChanged && <input aria-hidden="true" readOnly tabIndex={-1} value={run.value} className="pointer-events-none absolute inset-0 z-[1] min-w-0 rounded-sm border-0 px-0 outline-none" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
+                            <button type="button" aria-label={`Edit page ${run.pageIndex + 1} text: ${run.value || run.original}`} title={`Click to edit: ${run.value || run.original}`} onClick={() => startTextRunEdit(run.id)} className={`absolute inset-0 z-10 cursor-text appearance-none rounded-sm bg-transparent p-0 text-transparent outline-none transition focus:ring-2 focus:ring-blue-300 ${isSelected ? "pointer-events-none" : isSearchMatch ? "bg-amber-300/20 ring-1 ring-amber-500" : "hover:bg-blue-300/15 hover:ring-1 hover:ring-blue-500"}`} />
+                            {isSelected && <div ref={activeToolbarRef} role="toolbar" aria-label="PDF text formatting controls" className="absolute z-30 box-border w-max max-w-[100cqw] rounded-lg border border-slate-300 bg-slate-200/90 shadow-sm shadow-slate-900/10" style={{ left: toolbarPosition.runId === run.id ? `${toolbarPosition.left}px` : "0", top: "calc(100% + 8px)" }}>
+                              <div className="flex flex-wrap items-center gap-1 p-1.5 text-xs text-slate-700">
+                                <label className="shrink-0"><span className="sr-only">Font</span><select aria-label="Font" value={run.fontPreset} onChange={(event) => updateTextRunAppearance(run.id, { fontPreset: event.target.value as FontPreset })} className="w-28 rounded border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600"><option value="auto">Auto detected</option><option value="arial">Arial</option><option value="helvetica">Helvetica</option><option value="timesNewRoman">Times New Roman</option><option value="georgia">Georgia</option><option value="verdana">Verdana</option><option value="tahoma">Tahoma</option><option value="courierNew">Courier New</option><option value="trebuchetMs">Trebuchet MS</option></select></label>
+                                <label className="shrink-0"><span className="sr-only">Font size in points</span><input aria-label="Font size in points" type="number" min="4" max="96" step="0.1" value={run.fontSize} onChange={(event) => updateTextRunAppearance(run.id, { fontSize: Math.max(4, Math.min(96, Number(event.target.value) || run.fontSize)) })} className="w-14 rounded border border-slate-300 px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600" /></label>
+                                <span className="flex shrink-0 items-center gap-1"><button type="button" aria-label="Bold" aria-pressed={run.isBold} onClick={() => updateTextRunFormatting(run.id, { isBold: !run.isBold, isItalic: run.isItalic, isUnderline: run.isUnderline, alignment: run.alignment })} className={`rounded px-1.5 py-1 font-bold ${run.isBold ? "bg-blue-100 text-blue-800" : "hover:bg-slate-100"}`}>B</button><button type="button" aria-label="Italic" aria-pressed={run.isItalic} onClick={() => updateTextRunFormatting(run.id, { isBold: run.isBold, isItalic: !run.isItalic, isUnderline: run.isUnderline, alignment: run.alignment })} className={`rounded px-1.5 py-1 italic ${run.isItalic ? "bg-blue-100 text-blue-800" : "hover:bg-slate-100"}`}>I</button><button type="button" aria-label="Underline" aria-pressed={run.isUnderline} onClick={() => updateTextRunFormatting(run.id, { isBold: run.isBold, isItalic: run.isItalic, isUnderline: !run.isUnderline, alignment: run.alignment })} className={`rounded px-1.5 py-1 underline ${run.isUnderline ? "bg-blue-100 text-blue-800" : "hover:bg-slate-100"}`}>U</button></span>
+                                <label className="shrink-0"><span className="sr-only">Text alignment</span><select aria-label="Text alignment" value={run.alignment} onChange={(event) => updateTextRunFormatting(run.id, { isBold: run.isBold, isItalic: run.isItalic, isUnderline: run.isUnderline, alignment: event.target.value as TextAlignment })} className="w-20 rounded border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+                                <label className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded border border-slate-300 bg-white px-1.5 py-0.5 font-medium"><span>Text</span><input aria-label="Text colour" type="color" value={colorToHex(run.textColor)} onChange={(event) => updateTextRunAppearance(run.id, { textColor: hexToColor(event.target.value, run.textColor) })} className="h-5 w-5 cursor-pointer border-0 bg-transparent p-0" /></label>
+                                <label className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded border border-slate-300 bg-white px-1.5 py-0.5 font-medium"><span>BG</span><input aria-label="Background colour" type="color" value={colorToHex(run.backgroundColor)} onChange={(event) => updateTextRunAppearance(run.id, { backgroundColor: hexToColor(event.target.value, run.backgroundColor) })} className="h-5 w-5 cursor-pointer border-0 bg-transparent p-0" /></label>
+                                <button type="button" aria-label="Cut" title="Cut" onPointerDown={(event) => event.preventDefault()} onClick={() => { void cutSelectedInputText(run.id); }} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950"><Scissors aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" aria-label="Copy" title="Copy" onPointerDown={(event) => event.preventDefault()} onClick={() => { void copySelectedInputText(run.id); }} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950"><Copy aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" aria-label="Paste" title="Paste" onPointerDown={(event) => event.preventDefault()} onClick={() => { void pasteIntoSelectedInput(run.id); }} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950"><ClipboardPaste aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" aria-label="Delete" title="Delete" onPointerDown={(event) => event.preventDefault()} onClick={() => deleteTextRun(run.id)} disabled={!run.value} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950 disabled:cursor-not-allowed disabled:text-slate-400 disabled:opacity-40"><Trash2 aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" aria-label="Undo" title="Undo" onPointerDown={(event) => event.preventDefault()} onClick={() => undoTextRunEdit(run.id)} disabled={textEditHistory.runId !== run.id || textEditHistory.position <= 0} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950 disabled:cursor-not-allowed disabled:text-slate-400 disabled:opacity-40"><Undo2 aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" aria-label="Redo" title="Redo" onPointerDown={(event) => event.preventDefault()} onClick={() => redoTextRunEdit(run.id)} disabled={textEditHistory.runId !== run.id || textEditHistory.position >= textEditHistory.snapshots.length - 1} className="shrink-0 rounded p-1.5 text-slate-700 hover:bg-slate-100 hover:text-slate-950 disabled:cursor-not-allowed disabled:text-slate-400 disabled:opacity-40"><Redo2 aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                                <button type="button" onClick={finishTextRunEdit} className="shrink-0 rounded bg-blue-600 px-2 py-1 font-bold text-white hover:bg-blue-700">Done</button>
+                                <button type="button" aria-label="Match Original" title="Match Original" aria-pressed={run.matchOriginal} onPointerDown={(event) => event.preventDefault()} onClick={() => setMatchOriginal(run.id, !run.matchOriginal)} className={`shrink-0 rounded p-1.5 ${run.matchOriginal ? "bg-blue-100 text-blue-800" : "border border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-950"}`}><Check aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                              </div>
                             </div>}
                           </div>;
                         })}
@@ -1545,7 +1945,7 @@ export default function PdfToolsPage() {
                   <div className="border-t border-slate-200 bg-blue-50/50 p-4">
                     {selectedTextRun ? <><p className="text-xs font-bold uppercase tracking-wide text-blue-800">Editing on page {selectedTextRun.pageIndex + 1}</p><p className="mt-1 text-sm leading-5 text-slate-600">Use the floating editor on the PDF itself. Font, size, text colour and background can be corrected there.</p><button type="button" onClick={() => setSelectedTextRunId(null)} className="mt-3 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50">Close editor</button></> : <p className="text-sm leading-6 text-slate-500">Click any text directly in the PDF. Its editor will open beside that line.</p>}
                   </div>
-                  <div className="border-t border-slate-200 bg-slate-50 p-4"><div className="flex items-center justify-between gap-2"><p className="text-sm font-bold text-slate-800">Change history</p><span data-no-translate className="text-xs font-semibold text-slate-500">{textChangeCount} pending</span></div>{changedTextRuns.length ? <div className="mt-3 space-y-2">{changedTextRuns.map((run) => <article key={run.id} className="rounded-lg border border-blue-100 bg-white p-3"><div className="flex items-start justify-between gap-2"><button type="button" onClick={() => { setSelectedTextRunId(run.id); scrollToEditorPage(run.pageIndex); }} className="min-w-0 text-left text-sm font-semibold text-blue-800 hover:text-blue-950"><span className="block text-[11px] uppercase tracking-wide text-slate-500">Page {run.pageIndex + 1}</span><span className="block truncate text-slate-500 line-through">{run.original}</span><span className="block truncate text-slate-900">{run.value || "(removed)"}</span></button><button type="button" onClick={() => discardTextRunChange(run.id)} className="shrink-0 text-xs font-bold text-slate-500 hover:text-red-700">Remove</button></div></article>)}</div> : <p className="mt-2 text-sm leading-5 text-slate-500">No unsaved changes. Saved changes disappear from this list.</p>}</div>
+                  <div className="border-t border-slate-200 bg-slate-50 p-4"><div className="flex items-center justify-between gap-2"><p className="text-sm font-bold text-slate-800">Change history</p><span data-no-translate className="text-xs font-semibold text-slate-500">{textChangeCount} pending</span></div>{changedTextRuns.length ? <div className="mt-3 space-y-2">{changedTextRuns.map((run) => <article key={run.id} className="rounded-lg border border-blue-100 bg-white p-3"><div className="flex items-start justify-between gap-2"><button type="button" onClick={() => { startTextRunEdit(run.id); scrollToEditorPage(run.pageIndex); }} className="min-w-0 text-left text-sm font-semibold text-blue-800 hover:text-blue-950"><span className="block text-[11px] uppercase tracking-wide text-slate-500">Page {run.pageIndex + 1}</span><span className="block truncate text-slate-500 line-through">{run.original}</span><span className="block truncate text-slate-900">{run.value || "(removed)"}</span></button><button type="button" onClick={() => discardTextRunChange(run.id)} className="shrink-0 text-xs font-bold text-slate-500 hover:text-red-700">Remove</button></div></article>)}</div> : <p className="mt-2 text-sm leading-5 text-slate-500">No unsaved changes. Saved changes disappear from this list.</p>}</div>
                   <div className="border-t border-slate-200 p-4">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Saving your PDF" message="Processing your changes securely in your browser. Download will start automatically." progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles || textChangeCount === 0} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Saving PDF..." : "Save PDF and download"}</button><p className="mt-2 text-center text-xs leading-5 text-slate-500">After save, the change history is cleared.</p></div>
                 </section>
               </aside>
