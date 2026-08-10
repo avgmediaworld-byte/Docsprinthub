@@ -30,6 +30,9 @@ export const metadata: Metadata = {
     title: "DocSprintHub | Free Document & PDF Tools",
     description: "Create professional resumes, cover pages, PDFs, and QR codes with free online document tools from DocSprintHub.",
   },
+  verification: {
+    google: "XgH1qEJOZLqrkmibDyvtHRtR5Cknk4bpioTQXZtXleY",
+  },
   robots: {
     index: true,
     follow: true,
