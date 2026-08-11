@@ -92,6 +92,11 @@ type PdfEditorCapabilities = {
   asyncTextIteration: boolean;
   canvas: boolean;
 };
+type EditorPageFailure = {
+  message: string;
+  automaticRetryUsed: boolean;
+  retrying: boolean;
+};
 type EditorPdfSession = {
   id: number;
   cancelled: boolean;
@@ -105,8 +110,9 @@ type EditorPdfSession = {
   queuedPageIndexes: Set<number>;
   renderingPageIndexes: Set<number>;
   queueRunning: boolean;
-  backgroundStopped: boolean;
   backgroundTimer: number | null;
+  pageFailures: Map<number, EditorPageFailure>;
+  pageRetryTimers: Map<number, number>;
   cleanupPromise: Promise<void> | null;
   capabilities: PdfEditorCapabilities | null;
   pdfjsVersion: string | null;
@@ -405,8 +411,9 @@ function createEditorPdfSession(id: number): EditorPdfSession {
     queuedPageIndexes: new Set(),
     renderingPageIndexes: new Set(),
     queueRunning: false,
-    backgroundStopped: false,
     backgroundTimer: null,
+    pageFailures: new Map(),
+    pageRetryTimers: new Map(),
     cleanupPromise: null,
     capabilities: null,
     pdfjsVersion: null,
@@ -429,6 +436,9 @@ async function destroyEditorPdfSession(session: EditorPdfSession) {
   session.cancelled = true;
   if (session.backgroundTimer !== null) window.clearTimeout(session.backgroundTimer);
   session.backgroundTimer = null;
+  session.pageRetryTimers.forEach((timer) => window.clearTimeout(timer));
+  session.pageRetryTimers.clear();
+  session.pageFailures.clear();
   session.queuedPages = [];
   session.queuedPageIndexes.clear();
   session.renderTasks.forEach((task) => task.cancel());
@@ -464,6 +474,11 @@ function withPdfEditorWatchdog<T>(promise: Promise<T>, stage: string, timeoutMs:
       },
     );
   });
+}
+
+function isPdfEditorWatchdogTimeout(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\btook too long\b/i.test(message);
 }
 
 function isPdfEditorCancellation(session: EditorPdfSession, error: unknown) {
@@ -1053,6 +1068,7 @@ export default function PdfToolsPage() {
   const [editableTextRuns, setEditableTextRuns] = useState<EditableTextRun[]>([]);
   const [editablePdfPages, setEditablePdfPages] = useState<EditablePdfPage[]>([]);
   const [editorPageCount, setEditorPageCount] = useState(0);
+  const [editorPageFailures, setEditorPageFailures] = useState<Record<number, EditorPageFailure>>({});
   const [editorLoadingMessage, setEditorLoadingMessage] = useState("");
   const [editorLoadError, setEditorLoadError] = useState("");
   const [editorReloadToken, setEditorReloadToken] = useState(0);
@@ -1259,6 +1275,15 @@ export default function PdfToolsPage() {
       releaseEditorPageSurface(surface);
       return;
     }
+    const retryTimer = session.pageRetryTimers.get(page.pageIndex);
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    session.pageRetryTimers.delete(page.pageIndex);
+    session.pageFailures.delete(page.pageIndex);
+    setEditorPageFailures((current) => {
+      if (!(page.pageIndex in current)) return current;
+      const { [page.pageIndex]: _removed, ...remaining } = current;
+      return remaining;
+    });
     session.surfaces.set(page.pageIndex, surface);
     setEditablePdfPages((current) => current.some((item) => item.pageIndex === page.pageIndex)
       ? current
@@ -1302,15 +1327,41 @@ export default function PdfToolsPage() {
   }
 
   function scheduleNextBackgroundEditorPage(session: EditorPdfSession) {
-    if (!isCurrentEditorSession(session) || session.backgroundStopped || session.backgroundTimer !== null || !session.pageCount) return;
+    if (!isCurrentEditorSession(session) || session.backgroundTimer !== null || !session.pageCount) return;
     const nextPageIndex = Array.from({ length: session.pageCount }, (_, index) => index).find((index) => !session.surfaces.has(index)
-      && !session.queuedPageIndexes.has(index) && !session.renderingPageIndexes.has(index));
+      && !session.queuedPageIndexes.has(index) && !session.renderingPageIndexes.has(index) && !session.pageFailures.has(index));
     if (nextPageIndex === undefined) return;
 
     session.backgroundTimer = window.setTimeout(() => {
       session.backgroundTimer = null;
       requestEditorPage(nextPageIndex);
     }, 400);
+  }
+
+  function scheduleTimedOutEditorPageRetry(session: EditorPdfSession, pageIndex: number) {
+    if (session.pageRetryTimers.has(pageIndex)) return;
+    const timer = window.setTimeout(() => {
+      session.pageRetryTimers.delete(pageIndex);
+      if (!isCurrentEditorSession(session) || !session.pageFailures.get(pageIndex)?.retrying) return;
+      requestEditorPage(pageIndex, true);
+    }, 750);
+    session.pageRetryTimers.set(pageIndex, timer);
+  }
+
+  function recordEditorPageFailure(session: EditorPdfSession, pageIndex: number, caughtError: unknown) {
+    const previousFailure = session.pageFailures.get(pageIndex);
+    const timedOut = isPdfEditorWatchdogTimeout(caughtError);
+    const retrying = timedOut && !previousFailure?.automaticRetryUsed;
+    const failure: EditorPageFailure = {
+      message: retrying
+        ? `Page ${pageIndex + 1} is taking longer than expected. Retrying it once in the background.`
+        : `Page ${pageIndex + 1} could not be prepared. Retry that page to try again.`,
+      automaticRetryUsed: previousFailure?.automaticRetryUsed === true || retrying,
+      retrying,
+    };
+    session.pageFailures.set(pageIndex, failure);
+    setEditorPageFailures((current) => ({ ...current, [pageIndex]: failure }));
+    if (retrying) scheduleTimedOutEditorPageRetry(session, pageIndex);
   }
 
   async function drainEditorPageQueue(session: EditorPdfSession) {
@@ -1329,14 +1380,8 @@ export default function PdfToolsPage() {
         } catch (caughtError) {
           if (!isPdfEditorCancellation(session, caughtError) && isCurrentEditorSession(session)) {
             logPdfEditorDiagnostic(`background-page-${pageIndex + 1}`, session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, caughtError);
-            session.backgroundStopped = true;
-            session.queuedPages = [];
-            session.queuedPageIndexes.clear();
-            setEditorLoadError(`Page ${pageIndex + 1} could not be prepared. Retry the PDF to try again.`);
-            if (editorPdfSessionRef.current === session) editorPdfSessionRef.current = null;
-            void destroyEditorPdfSession(session);
+            recordEditorPageFailure(session, pageIndex, caughtError);
           }
-          break;
         } finally {
           session.renderingPageIndexes.delete(pageIndex);
         }
@@ -1356,6 +1401,16 @@ export default function PdfToolsPage() {
     if (priority) session.queuedPages.unshift(pageIndex);
     else session.queuedPages.push(pageIndex);
     void drainEditorPageQueue(session);
+  }
+
+  function retryEditorPage(pageIndex: number) {
+    const session = editorPdfSessionRef.current;
+    const failure = session?.pageFailures.get(pageIndex);
+    if (!session || !failure || failure.retrying || !isCurrentEditorSession(session)) return;
+    const retryingFailure = { ...failure, retrying: true, message: `Retrying page ${pageIndex + 1}.` };
+    session.pageFailures.set(pageIndex, retryingFailure);
+    setEditorPageFailures((current) => ({ ...current, [pageIndex]: retryingFailure }));
+    requestEditorPage(pageIndex, true);
   }
 
   useEffect(() => {
@@ -1732,6 +1787,10 @@ export default function PdfToolsPage() {
   }
 
   function scrollToEditorPage(pageIndex: number) {
+    if (editorPageFailures[pageIndex]) {
+      retryEditorPage(pageIndex);
+      return;
+    }
     const page = editorPageRefs.current[pageIndex];
     if (page) {
       page.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1748,6 +1807,7 @@ export default function PdfToolsPage() {
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setEditorPageCount(0);
+    setEditorPageFailures({});
     setEditorLoadingMessage("");
     setEditorLoadError("");
     setSelectedTextRunId(null);
@@ -1770,6 +1830,7 @@ export default function PdfToolsPage() {
       setEditableTextRuns([]);
       setEditablePdfPages([]);
       setEditorPageCount(0);
+      setEditorPageFailures({});
       setEditorLoadingMessage("");
       setEditorLoadError("");
       setSelectedTextRunId(null);
@@ -1801,6 +1862,7 @@ export default function PdfToolsPage() {
         setEditableTextRuns([]);
         setEditablePdfPages([]);
         setEditorPageCount(0);
+        setEditorPageFailures({});
         setEditorLoadingMessage("File selected. Preparing a local PDF editor.");
         setEditorLoadError("");
         setSelectedTextRunId(null);
@@ -1819,6 +1881,7 @@ export default function PdfToolsPage() {
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setEditorPageCount(0);
+    setEditorPageFailures({});
     setSelectedTextRunId(null);
     setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setEditorLoadError("");
@@ -2431,6 +2494,7 @@ export default function PdfToolsPage() {
               <section aria-label="PDF page editor" className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3"><div><h3 className="font-bold text-slate-950">PDF pages</h3><p className="mt-1 text-xs text-slate-600">Click a line to edit it directly. Its appearance is sampled only when you begin editing it.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{editablePdfPages.length} of {editorPageCount} pages ready - {editableTextRuns.length} text items</span></div>
                 {editablePdfPages.length < editorPageCount && <p role="status" className="border-b border-slate-200 bg-blue-50 px-4 py-2 text-xs text-blue-900">Remaining pages are loading in the background. Select a page number to prioritize it.</p>}
+                {Object.entries(editorPageFailures).map(([pageIndex, failure]) => <p key={pageIndex} role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950">{failure.message}{!failure.retrying && <button type="button" onClick={() => retryEditorPage(Number(pageIndex))} className="ml-2 font-bold text-blue-800 underline hover:text-blue-950">Retry page {Number(pageIndex) + 1}</button>}</p>)}
                 {editableTextRuns.length === 0 && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950">No straight, selectable text was found on the loaded pages. Scanned PDFs need OCR first, and rotated text is not included in this editor.</p>}
                 <div className="max-h-[calc(100vh-15.5rem)] min-h-[34rem] overflow-y-auto overscroll-contain p-3 sm:p-5">
                   {editablePdfPages.map((page) => <article key={page.pageIndex} ref={(element) => { editorPageRefs.current[page.pageIndex] = element; }} className="mx-auto mb-8 w-full max-w-[58rem] scroll-mt-5 last:mb-0">
@@ -2450,9 +2514,9 @@ export default function PdfToolsPage() {
                           const previewWidth = isSelected || isChanged ? Math.min(100 - left, Math.max(width, (estimatedReplacementWidth / page.width) * 100)) : width;
                           const runStyle = { left: `${left}%`, top: `${top}%`, width: `${previewWidth}%`, height: `${height}%` };
                           return <div key={run.id} ref={isSelected ? activeTextEditorRef : undefined} className="absolute" style={runStyle}>
-                            {isSelected && <input ref={activeTextInputRef} data-text-run-id={run.id} aria-label={`Edit page ${run.pageIndex + 1} text`} lang={usesDevanagariFont(run) ? "hi" : undefined} autoFocus value={run.value} onInput={(event) => updateTextRun(run.id, event.currentTarget.value)} onCopy={(event) => handleInputCopy(event, run.id)} onCut={(event) => handleInputCut(event, run.id)} onPaste={(event) => handleInputPaste(event, run.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === "Escape") { event.preventDefault(); finishTextRunEdit(); return; } if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteTextRun(run.id); return; } if (event.ctrlKey || event.metaKey) { const key = event.key.toLowerCase(); if (key === "x") { event.preventDefault(); void cutSelectedInputText(run.id); } else if (key === "c") { event.preventDefault(); void copySelectedInputText(run.id); } else if (key === "v") { event.preventDefault(); void pasteIntoSelectedInput(run.id); } } }} className="absolute inset-0 z-20 min-w-0 rounded-sm border-0 px-0 outline-none ring-2 ring-blue-600" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
+                            {isSelected && <input ref={activeTextInputRef} data-text-run-id={run.id} aria-label={`Edit page ${run.pageIndex + 1} text`} lang={usesDevanagariFont(run) ? "hi" : undefined} autoFocus value={run.value} onInput={(event) => updateTextRun(run.id, event.currentTarget.value)} onCopy={(event) => handleInputCopy(event, run.id)} onCut={(event) => handleInputCut(event, run.id)} onPaste={(event) => handleInputPaste(event, run.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === "Escape") { event.preventDefault(); finishTextRunEdit(); return; } if (event.ctrlKey || event.metaKey) { const key = event.key.toLowerCase(); if (key === "x") { event.preventDefault(); void cutSelectedInputText(run.id); } else if (key === "c") { event.preventDefault(); void copySelectedInputText(run.id); } else if (key === "v") { event.preventDefault(); void pasteIntoSelectedInput(run.id); } } }} className="absolute inset-0 z-20 min-w-0 rounded-sm border-0 px-0 outline-none ring-2 ring-blue-600" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
                             {!isSelected && isChanged && <input aria-hidden="true" readOnly tabIndex={-1} value={run.value} className="pointer-events-none absolute inset-0 z-[1] min-w-0 rounded-sm border-0 px-0 outline-none" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
-                            <button type="button" aria-label={`Edit page ${run.pageIndex + 1} text: ${run.value || run.original}`} title={`Click to edit: ${run.value || run.original}`} onClick={() => startTextRunEdit(run.id)} className={`absolute inset-0 z-10 cursor-text appearance-none rounded-sm bg-transparent p-0 text-transparent outline-none transition focus:ring-2 focus:ring-blue-300 ${isSelected ? "pointer-events-none" : isSearchMatch ? "bg-amber-300/20 ring-1 ring-amber-500" : "hover:bg-blue-300/15 hover:ring-1 hover:ring-blue-500"}`} />
+                            <button type="button" aria-label={`Edit page ${run.pageIndex + 1} text: ${run.value || run.original}`} title={`Click to edit: ${run.value || run.original}`} onClick={() => startTextRunEdit(run.id)} className={`absolute inset-0 z-10 cursor-text appearance-none rounded-sm border-0 bg-transparent p-0 text-transparent outline-none transition focus:ring-2 focus:ring-blue-300 ${isSelected ? "pointer-events-none" : isSearchMatch ? "bg-amber-300/20 ring-1 ring-amber-500" : "hover:bg-blue-300/15 hover:ring-1 hover:ring-blue-500"}`} style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", backgroundColor: "transparent", backgroundImage: "none", border: 0, boxShadow: "none" }} />
                             {isSelected && <div ref={activeToolbarRef} role="toolbar" aria-label="PDF text formatting controls" className="absolute z-30 box-border w-max max-w-[100cqw] rounded-lg border border-slate-300 bg-slate-200/90 shadow-sm shadow-slate-900/10" style={{ left: toolbarPosition.runId === run.id ? `${toolbarPosition.left}px` : "0", top: "calc(100% + 8px)" }}>
                               <div className="flex flex-wrap items-center gap-1 p-1.5 text-xs text-slate-700">
                                 <label className="shrink-0"><span className="sr-only">Font</span><select aria-label="Font" value={run.fontPreset} onChange={(event) => updateTextRunAppearance(run.id, { fontPreset: event.target.value as FontPreset })} className="w-28 rounded border border-slate-300 bg-white px-1.5 py-1 text-xs text-slate-800 outline-none focus:border-blue-600"><option value="auto">Auto detected</option><option value="arial">Arial</option><option value="helvetica">Helvetica</option><option value="timesNewRoman">Times New Roman</option><option value="georgia">Georgia</option><option value="verdana">Verdana</option><option value="tahoma">Tahoma</option><option value="courierNew">Courier New</option><option value="trebuchetMs">Trebuchet MS</option></select></label>
