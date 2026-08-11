@@ -85,6 +85,7 @@ type EditablePdfPage = {
 type RenderedPdfPage = { blob: Blob; bytes: Uint8Array; width: number; height: number };
 type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
 type EditorPageSurface = ImageBitmap | HTMLCanvasElement;
+type CanvasTextPaintStatus = "painted" | "missing" | "unverified";
 type PdfEditorCapabilities = {
   worker: boolean;
   readableStream: boolean;
@@ -106,6 +107,7 @@ type EditorPdfSession = {
   pageCount: number;
   renderTasks: Set<RenderTask>;
   surfaces: Map<number, EditorPageSurface>;
+  readyPageIndexes: Set<number>;
   queuedPages: number[];
   queuedPageIndexes: Set<number>;
   renderingPageIndexes: Set<number>;
@@ -113,6 +115,8 @@ type EditorPdfSession = {
   backgroundTimer: number | null;
   pageFailures: Map<number, EditorPageFailure>;
   pageRetryTimers: Map<number, number>;
+  imageBitmapEnabled: boolean;
+  canvasTextFallbackMode: "unknown" | "enabled" | "disabled";
   cleanupPromise: Promise<void> | null;
   capabilities: PdfEditorCapabilities | null;
   pdfjsVersion: string | null;
@@ -187,9 +191,12 @@ const defaultTextColor: PdfColor = { red: 0, green: 0, blue: 0 };
 const defaultBackgroundColor: PdfColor = { red: 255, green: 255, blue: 255 };
 const PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS = 15_000;
 const PDF_EDITOR_BACKGROUND_STAGE_TIMEOUT_MS = 25_000;
+const PDF_EDITOR_IMAGE_BITMAP_TIMEOUT_MS = 2_000;
 const PDF_EDITOR_MAX_CANVAS_PIXELS = 4_000_000;
 const PDF_EDITOR_MAX_CANVAS_EDGE = 2_048;
 const PDF_EDITOR_MAX_APPEARANCE_SAMPLE_PIXELS = 12_288;
+const PDF_EDITOR_TEXT_PAINT_CHECK_RUNS = 8;
+const PDF_EDITOR_TEXT_PAINT_CHECK_PIXELS_PER_RUN = 2_048;
 const devanagariCharacters = /[\u0900-\u097F\uA8E0-\uA8FF]/u;
 let devanagariFontBytesPromise: Promise<Uint8Array> | null = null;
 
@@ -407,6 +414,7 @@ function createEditorPdfSession(id: number): EditorPdfSession {
     pageCount: 0,
     renderTasks: new Set(),
     surfaces: new Map(),
+    readyPageIndexes: new Set(),
     queuedPages: [],
     queuedPageIndexes: new Set(),
     renderingPageIndexes: new Set(),
@@ -414,6 +422,8 @@ function createEditorPdfSession(id: number): EditorPdfSession {
     backgroundTimer: null,
     pageFailures: new Map(),
     pageRetryTimers: new Map(),
+    imageBitmapEnabled: true,
+    canvasTextFallbackMode: "unknown",
     cleanupPromise: null,
     capabilities: null,
     pdfjsVersion: null,
@@ -445,6 +455,7 @@ async function destroyEditorPdfSession(session: EditorPdfSession) {
   session.renderTasks.clear();
   session.surfaces.forEach(releaseEditorPageSurface);
   session.surfaces.clear();
+  session.readyPageIndexes.clear();
 
   const loadingTask = session.loadingTask;
   const worker = session.worker;
@@ -479,6 +490,21 @@ function withPdfEditorWatchdog<T>(promise: Promise<T>, stage: string, timeoutMs:
 function isPdfEditorWatchdogTimeout(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return /\btook too long\b/i.test(message);
+}
+
+type PdfEditorStageError = Error & { pdfEditorStage?: string };
+
+function withPdfEditorStage(stage: string, error: unknown): PdfEditorStageError {
+  if (error instanceof Error && (error as PdfEditorStageError).pdfEditorStage) return error as PdfEditorStageError;
+  const message = error instanceof Error ? error.message : String(error);
+  const stagedError = new Error(`${stage}: ${message}`) as PdfEditorStageError;
+  stagedError.name = error instanceof Error ? error.name : "PdfEditorError";
+  stagedError.pdfEditorStage = stage;
+  return stagedError;
+}
+
+function pdfEditorFailureStage(error: unknown) {
+  return error instanceof Error ? (error as PdfEditorStageError).pdfEditorStage ?? "unknown" : "unknown";
 }
 
 function isPdfEditorCancellation(session: EditorPdfSession, error: unknown) {
@@ -612,6 +638,7 @@ function logPdfEditorDiagnostic(
   capabilities: PdfEditorCapabilities,
   pdfjsVersion: string | null,
   error?: unknown,
+  details?: Record<string, unknown>,
 ) {
   const diagnostic = {
     stage,
@@ -624,6 +651,7 @@ function logPdfEditorDiagnostic(
         message: error instanceof Error ? error.message : String(error),
       },
     } : {}),
+    ...(details ? { details } : {}),
   };
   console.info("[DocSprintHub PDF editor]", diagnostic);
 }
@@ -868,37 +896,129 @@ function editableTextRunsFromContent(pageIndex: number, content: PdfTextContent)
   return pageRuns;
 }
 
-async function renderEditorPageSurface(page: PDFPageProxy, session: EditorPdfSession, timeoutMs: number) {
-  const { originalViewport, viewport } = editorRenderViewport(page);
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
-  const context = canvas.getContext("2d");
-  if (!context) {
-    canvas.width = 0;
-    canvas.height = 0;
-    throw new Error("The browser canvas could not be started.");
-  }
+function renderedCanvasTextPaintStatus(
+  canvas: HTMLCanvasElement,
+  page: Pick<EditablePdfPage, "width" | "height">,
+  runs: EditableTextRun[],
+): { status: CanvasTextPaintStatus; sampledRuns: number } {
+  if (!runs.length || !page.width || !page.height || !canvas.width || !canvas.height) return { status: "unverified", sampledRuns: 0 };
+  const sampleCanvas = document.createElement("canvas");
+  const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
+  if (!sampleContext) return { status: "unverified", sampledRuns: 0 };
 
-  const renderTask = page.render({ canvas, canvasContext: context, viewport, background: "white" });
-  session.renderTasks.add(renderTask);
+  let sampledRuns = 0;
   try {
+    for (const run of runs.filter((item) => item.value.trim()).slice(0, PDF_EDITOR_TEXT_PAINT_CHECK_RUNS)) {
+      const sourceLeft = Math.max(0, (run.x / page.width) * canvas.width);
+      const sourceTop = Math.max(0, ((page.height - run.y - run.height) / page.height) * canvas.height);
+      const sourceWidth = Math.min(canvas.width - sourceLeft, Math.max(1, (run.width / page.width) * canvas.width));
+      const sourceHeight = Math.min(canvas.height - sourceTop, Math.max(1, (run.height / page.height) * canvas.height));
+      if (!sourceWidth || !sourceHeight) continue;
+
+      const sampleScale = Math.min(1, Math.sqrt(PDF_EDITOR_TEXT_PAINT_CHECK_PIXELS_PER_RUN / (sourceWidth * sourceHeight)));
+      sampleCanvas.width = Math.max(1, Math.floor(sourceWidth * sampleScale));
+      sampleCanvas.height = Math.max(1, Math.floor(sourceHeight * sampleScale));
+      sampleContext.clearRect(0, 0, sampleCanvas.width, sampleCanvas.height);
+      sampleContext.drawImage(canvas, sourceLeft, sourceTop, sourceWidth, sourceHeight, 0, 0, sampleCanvas.width, sampleCanvas.height);
+      const data = sampleContext.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height).data;
+      const buckets = new Map<string, { count: number; red: number; green: number; blue: number }>();
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index + 3] < 32) continue;
+        const red = data[index];
+        const green = data[index + 1];
+        const blue = data[index + 2];
+        const key = `${red >> 4}-${green >> 4}-${blue >> 4}`;
+        const bucket = buckets.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
+        bucket.count += 1;
+        bucket.red += red;
+        bucket.green += green;
+        bucket.blue += blue;
+        buckets.set(key, bucket);
+      }
+      const dominant = [...buckets.values()].sort((first, second) => second.count - first.count)[0];
+      if (!dominant) continue;
+      const background = { red: dominant.red / dominant.count, green: dominant.green / dominant.count, blue: dominant.blue / dominant.count };
+      let contrastingPixels = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        if (data[index + 3] < 32) continue;
+        const distance = Math.abs(data[index] - background.red) + Math.abs(data[index + 1] - background.green) + Math.abs(data[index + 2] - background.blue);
+        if (distance > 48) contrastingPixels += 1;
+      }
+      sampledRuns += 1;
+      if (contrastingPixels >= Math.max(3, Math.ceil((data.length / 4) * 0.006))) return { status: "painted", sampledRuns };
+    }
+    return { status: sampledRuns ? "missing" : "unverified", sampledRuns };
+  } catch {
+    return { status: "unverified", sampledRuns };
+  } finally {
+    sampleCanvas.width = 0;
+    sampleCanvas.height = 0;
+  }
+}
+
+async function renderEditorPageSurface(
+  page: PDFPageProxy,
+  session: EditorPdfSession,
+  timeoutMs: number,
+  textRuns: EditableTextRun[],
+) {
+  let renderStage = "Creating the PDF page canvas";
+  const canvas = document.createElement("canvas");
+  let renderTask: RenderTask | null = null;
+  try {
+    renderStage = "Calculating the PDF page preview size";
+    const { originalViewport, viewport } = editorRenderViewport(page);
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    renderStage = "Starting the PDF page canvas";
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("The browser canvas could not be started.");
+
+    renderStage = "Rendering the PDF page";
+    renderTask = page.render({ canvas, canvasContext: context, viewport, background: "white" });
+    session.renderTasks.add(renderTask);
     await withPdfEditorWatchdog(renderTask.promise, "Rendering the PDF page", timeoutMs);
     if (session.cancelled) throw new Error("PDF editor loading was cancelled.");
-    if (typeof window.createImageBitmap === "function") {
-      const bitmap = await withPdfEditorWatchdog(window.createImageBitmap(canvas), "Preparing the PDF preview", timeoutMs);
-      canvas.width = 0;
-      canvas.height = 0;
-      return { surface: bitmap as EditorPageSurface, width: originalViewport.width, height: originalViewport.height };
+
+    if (session.canvasTextFallbackMode === "unknown") {
+      const detection = renderedCanvasTextPaintStatus(canvas, { width: originalViewport.width, height: originalViewport.height }, textRuns);
+      if (detection.status !== "unverified") {
+        session.canvasTextFallbackMode = detection.status === "missing" ? "enabled" : "disabled";
+      }
+      logPdfEditorDiagnostic("canvas-text-paint-check", session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, undefined, {
+        result: detection.status,
+        sampledRuns: detection.sampledRuns,
+      });
+    }
+
+    if (session.imageBitmapEnabled && typeof window.createImageBitmap === "function") {
+      renderStage = "Preparing the PDF preview";
+      const bitmapPromise = window.createImageBitmap(canvas);
+      try {
+        const bitmap = await withPdfEditorWatchdog(bitmapPromise, "Preparing the PDF preview", Math.min(timeoutMs, PDF_EDITOR_IMAGE_BITMAP_TIMEOUT_MS));
+        canvas.width = 0;
+        canvas.height = 0;
+        return { surface: bitmap as EditorPageSurface, width: originalViewport.width, height: originalViewport.height };
+      } catch (bitmapError) {
+        // The rendered canvas is already usable. Some legacy browser/GPU pairs
+        // stall when copying it into an ImageBitmap, so keep this page usable
+        // and avoid repeating that extra copy for later pages in this session.
+        session.imageBitmapEnabled = false;
+        void bitmapPromise.then((bitmap) => bitmap.close()).catch(() => undefined);
+        logPdfEditorDiagnostic("image-bitmap-fallback", session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, bitmapError, {
+          pageWidth: canvas.width,
+          pageHeight: canvas.height,
+        });
+      }
     }
     return { surface: canvas as EditorPageSurface, width: originalViewport.width, height: originalViewport.height };
   } catch (error) {
-    renderTask.cancel();
+    renderTask?.cancel();
     canvas.width = 0;
     canvas.height = 0;
-    throw error;
+    throw withPdfEditorStage(renderStage, error);
   } finally {
-    session.renderTasks.delete(renderTask);
+    if (renderTask) session.renderTasks.delete(renderTask);
   }
 }
 
@@ -1069,6 +1189,7 @@ export default function PdfToolsPage() {
   const [editablePdfPages, setEditablePdfPages] = useState<EditablePdfPage[]>([]);
   const [editorPageCount, setEditorPageCount] = useState(0);
   const [editorPageFailures, setEditorPageFailures] = useState<Record<number, EditorPageFailure>>({});
+  const [editorPageTextFallbacks, setEditorPageTextFallbacks] = useState<Record<number, true>>({});
   const [editorLoadingMessage, setEditorLoadingMessage] = useState("");
   const [editorLoadError, setEditorLoadError] = useState("");
   const [editorReloadToken, setEditorReloadToken] = useState(0);
@@ -1250,13 +1371,20 @@ export default function PdfToolsPage() {
 
   function paintEditorPagePreview(pageIndex: number, canvas: HTMLCanvasElement | null) {
     if (!canvas) return;
-    const surface = editorPdfSessionRef.current?.surfaces.get(pageIndex);
+    const session = editorPdfSessionRef.current;
+    const surface = session?.surfaces.get(pageIndex);
     if (!surface) return;
     const context = canvas.getContext("2d");
     if (!context) return;
     canvas.width = surface.width;
     canvas.height = surface.height;
-    context.drawImage(surface, 0, 0);
+    try {
+      context.drawImage(surface, 0, 0);
+      session?.surfaces.delete(pageIndex);
+      releaseEditorPageSurface(surface);
+    } catch (error) {
+      logPdfEditorDiagnostic("painting-page-preview", session?.capabilities ?? getPdfEditorCapabilities(), session?.pdfjsVersion ?? null, error, { pageIndex: pageIndex + 1 });
+    }
   }
 
   function setEditorPreviewCanvas(pageIndex: number, canvas: HTMLCanvasElement | null) {
@@ -1284,6 +1412,10 @@ export default function PdfToolsPage() {
       const { [page.pageIndex]: _removed, ...remaining } = current;
       return remaining;
     });
+    session.readyPageIndexes.add(page.pageIndex);
+    if (session.canvasTextFallbackMode === "enabled" && runs.length) {
+      setEditorPageTextFallbacks((current) => ({ ...current, [page.pageIndex]: true }));
+    }
     session.surfaces.set(page.pageIndex, surface);
     setEditablePdfPages((current) => current.some((item) => item.pageIndex === page.pageIndex)
       ? current
@@ -1310,25 +1442,31 @@ export default function PdfToolsPage() {
     const pdf = session.pdf;
     const capabilities = session.capabilities;
     if (!pdf || !capabilities || session.cancelled) throw new Error("PDF editor loading was cancelled.");
-    const page = await withPdfEditorWatchdog(pdf.getPage(pageIndex + 1), `Opening page ${pageIndex + 1}`, timeoutMs);
+    let stage = `Opening page ${pageIndex + 1}`;
+    let page: PDFPageProxy | null = null;
     try {
-      const content = await withPdfEditorWatchdog(readEditorPdfTextContent(page, capabilities, session.pdfjsVersion), `Reading text on page ${pageIndex + 1}`, timeoutMs);
+      page = await withPdfEditorWatchdog(pdf.getPage(pageIndex + 1), stage, timeoutMs);
+      stage = `Reading text on page ${pageIndex + 1}`;
+      const content = await withPdfEditorWatchdog(readEditorPdfTextContent(page, capabilities, session.pdfjsVersion), stage, timeoutMs);
       if (session.cancelled) throw new Error("PDF editor loading was cancelled.");
       const runs = editableTextRunsFromContent(pageIndex, content);
-      const preview = await renderEditorPageSurface(page, session, timeoutMs);
+      stage = `Rendering page ${pageIndex + 1}`;
+      const preview = await renderEditorPageSurface(page, session, timeoutMs, runs);
       return {
         page: { pageIndex, width: preview.width, height: preview.height },
         runs,
         surface: preview.surface,
       };
+    } catch (error) {
+      throw withPdfEditorStage(stage, error);
     } finally {
-      page.cleanup();
+      page?.cleanup();
     }
   }
 
   function scheduleNextBackgroundEditorPage(session: EditorPdfSession) {
     if (!isCurrentEditorSession(session) || session.backgroundTimer !== null || !session.pageCount) return;
-    const nextPageIndex = Array.from({ length: session.pageCount }, (_, index) => index).find((index) => !session.surfaces.has(index)
+    const nextPageIndex = Array.from({ length: session.pageCount }, (_, index) => index).find((index) => !session.readyPageIndexes.has(index)
       && !session.queuedPageIndexes.has(index) && !session.renderingPageIndexes.has(index) && !session.pageFailures.has(index));
     if (nextPageIndex === undefined) return;
 
@@ -1372,14 +1510,14 @@ export default function PdfToolsPage() {
         const pageIndex = session.queuedPages.shift();
         if (pageIndex === undefined) continue;
         session.queuedPageIndexes.delete(pageIndex);
-        if (session.surfaces.has(pageIndex)) continue;
+        if (session.readyPageIndexes.has(pageIndex)) continue;
         session.renderingPageIndexes.add(pageIndex);
         try {
           const prepared = await prepareEditorPage(session, pageIndex, PDF_EDITOR_BACKGROUND_STAGE_TIMEOUT_MS);
           publishEditorPage(session, prepared.page, prepared.runs, prepared.surface);
         } catch (caughtError) {
           if (!isPdfEditorCancellation(session, caughtError) && isCurrentEditorSession(session)) {
-            logPdfEditorDiagnostic(`background-page-${pageIndex + 1}`, session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, caughtError);
+            logPdfEditorDiagnostic(`background-page-${pageIndex + 1}:${pdfEditorFailureStage(caughtError)}`, session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, caughtError);
             recordEditorPageFailure(session, pageIndex, caughtError);
           }
         } finally {
@@ -1395,7 +1533,7 @@ export default function PdfToolsPage() {
 
   function requestEditorPage(pageIndex: number, priority = false) {
     const session = editorPdfSessionRef.current;
-    if (!session || !isCurrentEditorSession(session) || pageIndex < 0 || pageIndex >= session.pageCount || session.surfaces.has(pageIndex)
+    if (!session || !isCurrentEditorSession(session) || pageIndex < 0 || pageIndex >= session.pageCount || session.readyPageIndexes.has(pageIndex)
       || session.queuedPageIndexes.has(pageIndex) || session.renderingPageIndexes.has(pageIndex)) return;
     session.queuedPageIndexes.add(pageIndex);
     if (priority) session.queuedPages.unshift(pageIndex);
@@ -1469,8 +1607,9 @@ export default function PdfToolsPage() {
           setProgressPercent(50);
           setEditorLoadingMessage("First-page text is ready. Rendering its preview.");
           loadingStage = "Rendering page 1";
-          const preview = await renderEditorPageSurface(firstPage, session, PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
-          prepared = { page: { pageIndex: 0, width: preview.width, height: preview.height }, runs: editableTextRunsFromContent(0, content), surface: preview.surface };
+          const runs = editableTextRunsFromContent(0, content);
+          const preview = await renderEditorPageSurface(firstPage, session, PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS, runs);
+          prepared = { page: { pageIndex: 0, width: preview.width, height: preview.height }, runs, surface: preview.surface };
         } finally {
           firstPage.cleanup();
         }
@@ -1596,6 +1735,8 @@ export default function PdfToolsPage() {
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setEditorPageCount(0);
+    setEditorPageFailures({});
+    setEditorPageTextFallbacks({});
     setEditorLoadingMessage("");
     setEditorLoadError("");
     setSelectedTextRunId(null);
@@ -1808,6 +1949,7 @@ export default function PdfToolsPage() {
     setEditablePdfPages([]);
     setEditorPageCount(0);
     setEditorPageFailures({});
+    setEditorPageTextFallbacks({});
     setEditorLoadingMessage("");
     setEditorLoadError("");
     setSelectedTextRunId(null);
@@ -1831,6 +1973,7 @@ export default function PdfToolsPage() {
       setEditablePdfPages([]);
       setEditorPageCount(0);
       setEditorPageFailures({});
+      setEditorPageTextFallbacks({});
       setEditorLoadingMessage("");
       setEditorLoadError("");
       setSelectedTextRunId(null);
@@ -1863,6 +2006,7 @@ export default function PdfToolsPage() {
         setEditablePdfPages([]);
         setEditorPageCount(0);
         setEditorPageFailures({});
+        setEditorPageTextFallbacks({});
         setEditorLoadingMessage("File selected. Preparing a local PDF editor.");
         setEditorLoadError("");
         setSelectedTextRunId(null);
@@ -1882,6 +2026,7 @@ export default function PdfToolsPage() {
     setEditablePdfPages([]);
     setEditorPageCount(0);
     setEditorPageFailures({});
+    setEditorPageTextFallbacks({});
     setSelectedTextRunId(null);
     setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setEditorLoadError("");
@@ -2505,6 +2650,7 @@ export default function PdfToolsPage() {
                           const isSelected = selectedTextRunId === run.id;
                           const isSearchMatch = textEditorQuery.trim().length > 0 && matchingTextRunIds.has(run.id);
                           const isChanged = textRunHasChanges(run);
+                          const usesCanvasTextFallback = editorPageTextFallbacks[page.pageIndex] === true;
                           const previewFontFamily = editorPreviewFont(run);
                           const left = Math.max(0, (run.x / page.width) * 100);
                           const top = Math.max(0, ((page.height - run.y - run.height) / page.height) * 100);
@@ -2515,6 +2661,7 @@ export default function PdfToolsPage() {
                           const runStyle = { left: `${left}%`, top: `${top}%`, width: `${previewWidth}%`, height: `${height}%` };
                           return <div key={run.id} ref={isSelected ? activeTextEditorRef : undefined} className="absolute" style={runStyle}>
                             {isSelected && <input ref={activeTextInputRef} data-text-run-id={run.id} aria-label={`Edit page ${run.pageIndex + 1} text`} lang={usesDevanagariFont(run) ? "hi" : undefined} autoFocus value={run.value} onInput={(event) => updateTextRun(run.id, event.currentTarget.value)} onCopy={(event) => handleInputCopy(event, run.id)} onCut={(event) => handleInputCut(event, run.id)} onPaste={(event) => handleInputPaste(event, run.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === "Escape") { event.preventDefault(); finishTextRunEdit(); return; } if (event.ctrlKey || event.metaKey) { const key = event.key.toLowerCase(); if (key === "x") { event.preventDefault(); void cutSelectedInputText(run.id); } else if (key === "c") { event.preventDefault(); void copySelectedInputText(run.id); } else if (key === "v") { event.preventDefault(); void pasteIntoSelectedInput(run.id); } } }} className="absolute inset-0 z-20 min-w-0 rounded-sm border-0 px-0 outline-none ring-2 ring-blue-600" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
+                            {usesCanvasTextFallback && !isSelected && !isChanged && <span aria-hidden="true" data-pdf-text-fallback="true" className="pointer-events-none absolute inset-0 z-[1] block overflow-hidden whitespace-pre" style={{ backgroundColor: "transparent", color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }}>{run.value}</span>}
                             {!isSelected && isChanged && <input aria-hidden="true" readOnly tabIndex={-1} value={run.value} className="pointer-events-none absolute inset-0 z-[1] min-w-0 rounded-sm border-0 px-0 outline-none" style={{ backgroundColor: cssColor(run.backgroundColor), color: cssColor(run.textColor), fontFamily: previewFontFamily, fontSize: `${Math.max(0.7, (run.fontSize / page.width) * 100)}cqw`, fontWeight: run.isBold ? 700 : 400, fontStyle: run.isItalic ? "italic" : "normal", textDecoration: run.isUnderline ? "underline" : "none", textAlign: run.alignment, lineHeight: 1.1 }} />}
                             <button type="button" aria-label={`Edit page ${run.pageIndex + 1} text: ${run.value || run.original}`} title={`Click to edit: ${run.value || run.original}`} onClick={() => startTextRunEdit(run.id)} className={`absolute inset-0 z-10 cursor-text appearance-none rounded-sm border-0 bg-transparent p-0 text-transparent outline-none transition focus:ring-2 focus:ring-blue-300 ${isSelected ? "pointer-events-none" : isSearchMatch ? "bg-amber-300/20 ring-1 ring-amber-500" : "hover:bg-blue-300/15 hover:ring-1 hover:ring-blue-500"}`} style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", backgroundColor: "transparent", backgroundImage: "none", border: 0, boxShadow: "none" }} />
                             {isSelected && <div ref={activeToolbarRef} role="toolbar" aria-label="PDF text formatting controls" className="absolute z-30 box-border w-max max-w-[100cqw] rounded-lg border border-slate-300 bg-slate-200/90 shadow-sm shadow-slate-900/10" style={{ left: toolbarPosition.runId === run.id ? `${toolbarPosition.left}px` : "0", top: "calc(100% + 8px)" }}>
