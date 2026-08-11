@@ -85,6 +85,13 @@ type EditablePdfPage = {
 type RenderedPdfPage = { blob: Blob; bytes: Uint8Array; width: number; height: number };
 type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
 type EditorPageSurface = ImageBitmap | HTMLCanvasElement;
+type PdfEditorCapabilities = {
+  worker: boolean;
+  readableStream: boolean;
+  streamReader: boolean;
+  asyncTextIteration: boolean;
+  canvas: boolean;
+};
 type EditorPdfSession = {
   id: number;
   cancelled: boolean;
@@ -101,6 +108,8 @@ type EditorPdfSession = {
   backgroundStopped: boolean;
   backgroundTimer: number | null;
   cleanupPromise: Promise<void> | null;
+  capabilities: PdfEditorCapabilities | null;
+  pdfjsVersion: string | null;
 };
 
 const toolOptions: ToolOption[] = [
@@ -399,6 +408,8 @@ function createEditorPdfSession(id: number): EditorPdfSession {
     backgroundStopped: false,
     backgroundTimer: null,
     cleanupPromise: null,
+    capabilities: null,
+    pdfjsVersion: null,
   };
 }
 
@@ -545,6 +556,139 @@ async function loadPdfJs() {
   }
 
   return pdfjs;
+}
+
+function getPdfEditorCapabilities(): PdfEditorCapabilities {
+  const readableStream = typeof ReadableStream === "function";
+  const streamPrototype = readableStream ? ReadableStream.prototype : null;
+  const streamReader = typeof streamPrototype?.getReader === "function";
+  const asyncIterator = streamReader
+    && typeof Symbol === "function"
+    && typeof Symbol.asyncIterator === "symbol"
+    ? (streamPrototype as unknown as { [key: symbol]: unknown })[Symbol.asyncIterator]
+    : undefined;
+  const asyncTextIteration = typeof asyncIterator === "function";
+  const canvas = typeof document !== "undefined" && (() => {
+    const element = document.createElement("canvas");
+    return typeof element.getContext === "function" && element.getContext("2d") !== null;
+  })();
+
+  return {
+    worker: typeof Worker === "function",
+    readableStream,
+    streamReader,
+    asyncTextIteration,
+    canvas,
+  };
+}
+
+function unsupportedPdfEditorCapabilitiesMessage(capabilities: PdfEditorCapabilities) {
+  const missing: string[] = [];
+  if (!capabilities.worker) missing.push("Web Workers");
+  if (!capabilities.readableStream) missing.push("ReadableStream");
+  else if (!capabilities.streamReader) missing.push("ReadableStream.getReader()");
+  if (!capabilities.canvas) missing.push("Canvas");
+  if (!missing.length) return "";
+  return `This browser cannot run the PDF text editor because ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} unavailable. Enable these browser features or use a supported browser, then retry.`;
+}
+
+function logPdfEditorDiagnostic(
+  stage: string,
+  capabilities: PdfEditorCapabilities,
+  pdfjsVersion: string | null,
+  error?: unknown,
+) {
+  const diagnostic = {
+    stage,
+    pdfjsVersion,
+    capabilities,
+    userAgent: typeof navigator === "undefined" ? "unavailable" : navigator.userAgent,
+    ...(error ? {
+      error: {
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+      },
+    } : {}),
+  };
+  console.info("[DocSprintHub PDF editor]", diagnostic);
+}
+
+function isPdfTextStreamAsyncIterationError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bnot async iterable\b/i.test(message);
+}
+
+async function cancelEditorPdfTextStream(stream: ReturnType<PDFPageProxy["streamTextContent"]> | null, reason: unknown) {
+  if (!stream) return;
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  await stream.cancel(error).catch(() => undefined);
+}
+
+async function readEditorPdfTextContentWithReader(page: PDFPageProxy): Promise<PdfTextContent> {
+  const reader = page.streamTextContent().getReader();
+  const textContent: PdfTextContent = {
+    items: [],
+    styles: Object.create(null),
+    lang: null,
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      textContent.lang ??= value.lang;
+      Object.assign(textContent.styles, value.styles);
+      textContent.items.push(...value.items);
+    }
+  } catch (error) {
+    await reader.cancel(error instanceof Error ? error : new Error(String(error))).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  return textContent;
+}
+
+async function readEditorPdfTextContent(
+  page: PDFPageProxy,
+  capabilities: PdfEditorCapabilities,
+  pdfjsVersion: string | null,
+): Promise<PdfTextContent> {
+  if (!capabilities.asyncTextIteration) {
+    logPdfEditorDiagnostic("text-stream-reader-fallback", capabilities, pdfjsVersion);
+    return readEditorPdfTextContentWithReader(page);
+  }
+
+  let publicTextStream: ReturnType<PDFPageProxy["streamTextContent"]> | null = null;
+  const originalStreamTextContent = page.streamTextContent;
+  page.streamTextContent = ((params) => {
+    const stream = originalStreamTextContent.call(page, params);
+    publicTextStream = stream;
+    return stream;
+  }) as PDFPageProxy["streamTextContent"];
+
+  try {
+    return await page.getTextContent();
+  } catch (error) {
+    if (!isPdfTextStreamAsyncIterationError(error)) throw error;
+
+    // PDF.js creates the stream inside getTextContent(). Capture and cancel it
+    // before the one reader-based retry so a partially-started stream cannot
+    // keep the worker waiting in browsers with incomplete stream support.
+    await cancelEditorPdfTextStream(publicTextStream, error);
+    page.cleanup();
+    logPdfEditorDiagnostic("text-stream-reader-retry", capabilities, pdfjsVersion, error);
+    try {
+      return await readEditorPdfTextContentWithReader(page);
+    } catch (fallbackError) {
+      logPdfEditorDiagnostic("text-stream-reader-fallback-failed", capabilities, pdfjsVersion, fallbackError);
+      throw new Error("This browser could not read the PDF text stream. Retry or choose another PDF.");
+    }
+  } finally {
+    page.streamTextContent = originalStreamTextContent;
+  }
 }
 
 async function readPdfTextContent(page: PDFPageProxy): Promise<PdfTextContent> {
@@ -1139,10 +1283,11 @@ export default function PdfToolsPage() {
 
   async function prepareEditorPage(session: EditorPdfSession, pageIndex: number, timeoutMs: number) {
     const pdf = session.pdf;
-    if (!pdf || session.cancelled) throw new Error("PDF editor loading was cancelled.");
+    const capabilities = session.capabilities;
+    if (!pdf || !capabilities || session.cancelled) throw new Error("PDF editor loading was cancelled.");
     const page = await withPdfEditorWatchdog(pdf.getPage(pageIndex + 1), `Opening page ${pageIndex + 1}`, timeoutMs);
     try {
-      const content = await withPdfEditorWatchdog(page.getTextContent(), `Reading text on page ${pageIndex + 1}`, timeoutMs);
+      const content = await withPdfEditorWatchdog(readEditorPdfTextContent(page, capabilities, session.pdfjsVersion), `Reading text on page ${pageIndex + 1}`, timeoutMs);
       if (session.cancelled) throw new Error("PDF editor loading was cancelled.");
       const runs = editableTextRunsFromContent(pageIndex, content);
       const preview = await renderEditorPageSurface(page, session, timeoutMs);
@@ -1183,6 +1328,7 @@ export default function PdfToolsPage() {
           publishEditorPage(session, prepared.page, prepared.runs, prepared.surface);
         } catch (caughtError) {
           if (!isPdfEditorCancellation(session, caughtError) && isCurrentEditorSession(session)) {
+            logPdfEditorDiagnostic(`background-page-${pageIndex + 1}`, session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, caughtError);
             session.backgroundStopped = true;
             session.queuedPages = [];
             session.queuedPageIndexes.clear();
@@ -1220,21 +1366,34 @@ export default function PdfToolsPage() {
     editorPdfSessionRef.current = session;
 
     async function loadInitialEditorPage() {
+      let loadingStage = "Checking browser compatibility";
       try {
+        const capabilities = getPdfEditorCapabilities();
+        session.capabilities = capabilities;
+        logPdfEditorDiagnostic("capability-check", capabilities, null);
+        const compatibilityMessage = unsupportedPdfEditorCapabilitiesMessage(capabilities);
+        if (compatibilityMessage) throw new Error(compatibilityMessage);
+
+        loadingStage = "Reading the selected file";
         const sourceBytes = workingEditorPdfBytes.current ?? new Uint8Array(await withPdfEditorWatchdog(sourceFile.arrayBuffer(), "Reading the selected file", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS));
         if (!isCurrentEditorSession(session)) return;
         workingEditorPdfBytes.current = sourceBytes;
         setProgressPercent(10);
         setEditorLoadingMessage("File read. Starting the PDF.js worker.");
 
+        loadingStage = "Loading PDF.js";
         const pdfjs = await withPdfEditorWatchdog(loadPdfJs(), "Loading PDF.js", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
         if (!isCurrentEditorSession(session)) return;
+        session.pdfjsVersion = pdfjs.version;
+        logPdfEditorDiagnostic("pdfjs-ready", capabilities, session.pdfjsVersion);
         setProgressPercent(20);
+        loadingStage = "Starting the PDF.js worker";
         const worker = new pdfjs.PDFWorker();
         session.worker = worker;
         await withPdfEditorWatchdog(worker.promise, "Starting the PDF.js worker", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
         if (!isCurrentEditorSession(session)) return;
 
+        loadingStage = "Opening the PDF";
         const loadingTask = pdfjs.getDocument({ data: copyBytes(sourceBytes), worker });
         session.loadingTask = loadingTask;
         const pdf = await withPdfEditorWatchdog(loadingTask.promise, "Opening the PDF", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
@@ -1245,13 +1404,16 @@ export default function PdfToolsPage() {
         setProgressPercent(30);
         setEditorLoadingMessage(`PDF opened. Reading text on page 1 of ${pdf.numPages}.`);
 
+        loadingStage = "Opening page 1";
         const firstPage = await withPdfEditorWatchdog(pdf.getPage(1), "Opening page 1", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
         let prepared: { page: EditablePdfPage; runs: EditableTextRun[]; surface: EditorPageSurface } | null = null;
         try {
-          const content = await withPdfEditorWatchdog(firstPage.getTextContent(), "Reading text on page 1", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+          loadingStage = "Reading text on page 1";
+          const content = await withPdfEditorWatchdog(readEditorPdfTextContent(firstPage, capabilities, session.pdfjsVersion), "Reading text on page 1", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
           if (!isCurrentEditorSession(session)) return;
           setProgressPercent(50);
           setEditorLoadingMessage("First-page text is ready. Rendering its preview.");
+          loadingStage = "Rendering page 1";
           const preview = await renderEditorPageSurface(firstPage, session, PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
           prepared = { page: { pageIndex: 0, width: preview.width, height: preview.height }, runs: editableTextRunsFromContent(0, content), surface: preview.surface };
         } finally {
@@ -1272,6 +1434,7 @@ export default function PdfToolsPage() {
         scheduleNextBackgroundEditorPage(session);
       } catch (caughtError) {
         if (isPdfEditorCancellation(session, caughtError) || !isCurrentEditorSession(session)) return;
+        logPdfEditorDiagnostic(loadingStage, session.capabilities ?? getPdfEditorCapabilities(), session.pdfjsVersion, caughtError);
         const rawMessage = caughtError instanceof Error ? caughtError.message : "The PDF text editor could not be opened.";
         const message = /worker|fake worker|import/i.test(rawMessage)
           ? "The PDF worker could not start. Check browser extensions or security settings, then retry."
