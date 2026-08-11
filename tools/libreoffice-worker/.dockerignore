@@ -1,0 +1,19 @@
+# Local/build artifacts
+node_modules/
+dist/
+output/
+coverage/
+*.log
+
+# Input/output fixtures and generated documents must not become image layers.
+*.docx
+*.pdf
+
+# Local configuration and incidental tool data
+.env
+.env.*
+tools/
+tests/
+
+# Repository metadata is not needed by the standalone build context.
+.git
