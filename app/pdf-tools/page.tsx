@@ -8,7 +8,7 @@ import JSZip from "jszip";
 import jsPDF from "jspdf";
 import { Check, ClipboardPaste, Copy, Redo2, Scissors, Trash2, Undo2 } from "lucide-react";
 import { degrees, PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
-import type { PDFPageProxy } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask } from "pdfjs-dist";
 import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
 
 type Tool =
@@ -79,11 +79,29 @@ type ToolbarPosition = { runId: string | null; left: number };
 type TextInputSelection = { start: number; end: number; text: string };
 type EditablePdfPage = {
   pageIndex: number;
-  imageUrl: string;
   width: number;
   height: number;
 };
 type RenderedPdfPage = { blob: Blob; bytes: Uint8Array; width: number; height: number };
+type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
+type EditorPageSurface = ImageBitmap | HTMLCanvasElement;
+type EditorPdfSession = {
+  id: number;
+  cancelled: boolean;
+  loadingTask: PDFDocumentLoadingTask | null;
+  pdf: PDFDocumentProxy | null;
+  worker: PDFWorker | null;
+  pageCount: number;
+  renderTasks: Set<RenderTask>;
+  surfaces: Map<number, EditorPageSurface>;
+  queuedPages: number[];
+  queuedPageIndexes: Set<number>;
+  renderingPageIndexes: Set<number>;
+  queueRunning: boolean;
+  backgroundStopped: boolean;
+  backgroundTimer: number | null;
+  cleanupPromise: Promise<void> | null;
+};
 
 const toolOptions: ToolOption[] = [
   { id: "merge", title: "Merge PDFs", description: "Combine multiple PDF files." },
@@ -152,6 +170,11 @@ function copyBytes(bytes: Uint8Array) {
 
 const defaultTextColor: PdfColor = { red: 0, green: 0, blue: 0 };
 const defaultBackgroundColor: PdfColor = { red: 255, green: 255, blue: 255 };
+const PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS = 15_000;
+const PDF_EDITOR_BACKGROUND_STAGE_TIMEOUT_MS = 25_000;
+const PDF_EDITOR_MAX_CANVAS_PIXELS = 4_000_000;
+const PDF_EDITOR_MAX_CANVAS_EDGE = 2_048;
+const PDF_EDITOR_MAX_APPEARANCE_SAMPLE_PIXELS = 12_288;
 const devanagariCharacters = /[\u0900-\u097F\uA8E0-\uA8FF]/u;
 let devanagariFontBytesPromise: Promise<Uint8Array> | null = null;
 
@@ -296,14 +319,35 @@ function colorDistance(first: PdfColor, second: PdfColor) {
   return Math.abs(first.red - second.red) + Math.abs(first.green - second.green) + Math.abs(first.blue - second.blue);
 }
 
-function sampleRunAppearance(context: CanvasRenderingContext2D, run: Pick<EditableTextRun, "x" | "y" | "width" | "height">, scale: number): Pick<EditableTextRun, "textColor" | "backgroundColor"> {
-  const left = Math.max(0, Math.floor(run.x * scale));
-  const top = Math.max(0, Math.floor(context.canvas.height - (run.y + run.height) * scale));
-  const width = Math.min(context.canvas.width - left, Math.max(1, Math.ceil(run.width * scale)));
-  const height = Math.min(context.canvas.height - top, Math.max(1, Math.ceil(run.height * scale)));
-  if (!width || !height) return { textColor: defaultTextColor, backgroundColor: defaultBackgroundColor };
+function sampleRunAppearanceFromPreview(
+  previewCanvas: HTMLCanvasElement,
+  page: Pick<EditablePdfPage, "width" | "height">,
+  run: Pick<EditableTextRun, "x" | "y" | "width" | "height">,
+): Pick<EditableTextRun, "textColor" | "backgroundColor"> | null {
+  if (!page.width || !page.height || !previewCanvas.width || !previewCanvas.height) return null;
 
-  const data = context.getImageData(left, top, width, height).data;
+  const sourceLeft = Math.max(0, (run.x / page.width) * previewCanvas.width);
+  const sourceTop = Math.max(0, ((page.height - run.y - run.height) / page.height) * previewCanvas.height);
+  const sourceWidth = Math.min(previewCanvas.width - sourceLeft, Math.max(1, (run.width / page.width) * previewCanvas.width));
+  const sourceHeight = Math.min(previewCanvas.height - sourceTop, Math.max(1, (run.height / page.height) * previewCanvas.height));
+  if (!sourceWidth || !sourceHeight) return null;
+
+  const sampleScale = Math.min(1, Math.sqrt(PDF_EDITOR_MAX_APPEARANCE_SAMPLE_PIXELS / (sourceWidth * sourceHeight)));
+  const sampleCanvas = document.createElement("canvas");
+  sampleCanvas.width = Math.max(1, Math.floor(sourceWidth * sampleScale));
+  sampleCanvas.height = Math.max(1, Math.floor(sourceHeight * sampleScale));
+  const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
+  if (!sampleContext) return null;
+
+  let data: Uint8ClampedArray;
+  try {
+    sampleContext.drawImage(previewCanvas, sourceLeft, sourceTop, sourceWidth, sourceHeight, 0, 0, sampleCanvas.width, sampleCanvas.height);
+    data = sampleContext.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height).data;
+  } catch {
+    sampleCanvas.width = 0;
+    sampleCanvas.height = 0;
+    return null;
+  }
   const colorBuckets = new Map<string, { count: number; red: number; green: number; blue: number }>();
   for (let index = 0; index < data.length; index += 4) {
     if (data[index + 3] < 32) continue;
@@ -333,7 +377,102 @@ function sampleRunAppearance(context: CanvasRenderingContext2D, run: Pick<Editab
     return !best || score > best.score ? { color: candidate.color, score } : best;
   }, null)?.color ?? defaultTextColor;
 
+  sampleCanvas.width = 0;
+  sampleCanvas.height = 0;
   return { textColor: colorDistance(textColor, backgroundColor) < 24 ? defaultTextColor : textColor, backgroundColor };
+}
+
+function createEditorPdfSession(id: number): EditorPdfSession {
+  return {
+    id,
+    cancelled: false,
+    loadingTask: null,
+    pdf: null,
+    worker: null,
+    pageCount: 0,
+    renderTasks: new Set(),
+    surfaces: new Map(),
+    queuedPages: [],
+    queuedPageIndexes: new Set(),
+    renderingPageIndexes: new Set(),
+    queueRunning: false,
+    backgroundStopped: false,
+    backgroundTimer: null,
+    cleanupPromise: null,
+  };
+}
+
+function releaseEditorPageSurface(surface: EditorPageSurface) {
+  if (typeof ImageBitmap !== "undefined" && surface instanceof ImageBitmap) {
+    surface.close();
+    return;
+  }
+  const canvas = surface as HTMLCanvasElement;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+async function destroyEditorPdfSession(session: EditorPdfSession) {
+  if (session.cleanupPromise) return session.cleanupPromise;
+
+  session.cancelled = true;
+  if (session.backgroundTimer !== null) window.clearTimeout(session.backgroundTimer);
+  session.backgroundTimer = null;
+  session.queuedPages = [];
+  session.queuedPageIndexes.clear();
+  session.renderTasks.forEach((task) => task.cancel());
+  session.renderTasks.clear();
+  session.surfaces.forEach(releaseEditorPageSurface);
+  session.surfaces.clear();
+
+  const loadingTask = session.loadingTask;
+  const worker = session.worker;
+  session.loadingTask = null;
+  session.pdf = null;
+  session.worker = null;
+  session.cleanupPromise = (async () => {
+    if (loadingTask) await loadingTask.destroy().catch(() => undefined);
+    else await worker?.destroy();
+  })();
+  return session.cleanupPromise;
+}
+
+function withPdfEditorWatchdog<T>(promise: Promise<T>, stage: string, timeoutMs: number) {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`${stage} took too long. Check that your browser allows PDF workers, then retry.`));
+    }, timeoutMs);
+    void promise.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (reason) => {
+        window.clearTimeout(timeout);
+        reject(reason);
+      },
+    );
+  });
+}
+
+function isPdfEditorCancellation(session: EditorPdfSession, error: unknown) {
+  if (session.cancelled) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|cancel|destroyed|worker was terminated/i.test(message);
+}
+
+function editorRenderViewport(page: PDFPageProxy) {
+  const originalViewport = page.getViewport({ scale: 1 });
+  const maxScale = Math.min(
+    1.5,
+    PDF_EDITOR_MAX_CANVAS_EDGE / originalViewport.width,
+    PDF_EDITOR_MAX_CANVAS_EDGE / originalViewport.height,
+    Math.sqrt(PDF_EDITOR_MAX_CANVAS_PIXELS / (originalViewport.width * originalViewport.height)),
+  );
+  if (!Number.isFinite(maxScale) || maxScale < 0.1) {
+    throw new Error("This PDF page is too large to preview safely in the browser.");
+  }
+  return { originalViewport, viewport: page.getViewport({ scale: maxScale }) };
 }
 
 function downloadBlob(blob: Blob, fileName: string) {
@@ -407,8 +546,6 @@ async function loadPdfJs() {
 
   return pdfjs;
 }
-
-type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
 
 async function readPdfTextContent(page: PDFPageProxy): Promise<PdfTextContent> {
   const reader = page.streamTextContent().getReader();
@@ -510,16 +647,6 @@ async function renderPdfPages(
   return renderPdfPagesFromBytes(new Uint8Array(await file.arrayBuffer()), password, imageType, scale, jpegQuality);
 }
 
-async function renderEditablePdfPages(sourceBytes: Uint8Array) {
-  const pages = await renderPdfPagesFromBytes(sourceBytes, "", "image/png", 1.55);
-  return pages.map((page, pageIndex) => ({
-    pageIndex,
-    imageUrl: URL.createObjectURL(page.blob),
-    width: page.width,
-    height: page.height,
-  }));
-}
-
 async function extractPdfText(file: File, password = "") {
   const pdfjs = await loadPdfJs();
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), password: password || undefined });
@@ -536,80 +663,84 @@ async function extractPdfText(file: File, password = "") {
   return textPages;
 }
 
-async function getEditableTextRuns(sourceBytes: Uint8Array) {
-  const pdfjs = await loadPdfJs();
-  const loadingTask = pdfjs.getDocument({ data: copyBytes(sourceBytes) });
-  const pdf = await loadingTask.promise;
-  const runs: EditableTextRun[] = [];
-  const appearanceScale = 1.8;
+function editableTextRunsFromContent(pageIndex: number, content: PdfTextContent) {
+  const pageRuns: EditableTextRun[] = [];
+  content.items.forEach((item, itemIndex) => {
+    if (!("str" in item) || !item.str.trim()) return;
 
-  try {
-    for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
-      const page = await pdf.getPage(pageIndex + 1);
-      const content = await readPdfTextContent(page);
-      const pageRuns: EditableTextRun[] = [];
-      content.items.forEach((item, itemIndex) => {
-        if (!("str" in item) || !item.str.trim()) return;
+    const [a, b, c, d, x, y] = item.transform;
+    const style = content.styles[item.fontName];
+    // Rotated and skewed text cannot be safely covered by a rectangular
+    // correction layer, so it is intentionally excluded from this editor.
+    if (Math.abs(b) > 0.01 || Math.abs(c) > 0.01) return;
 
-        const [a, b, c, d, x, y] = item.transform;
-        const style = content.styles[item.fontName];
-        // Rotated and skewed text cannot be safely covered by a rectangular
-        // correction layer, so it is intentionally excluded from this editor.
-        if (Math.abs(b) > 0.01 || Math.abs(c) > 0.01) return;
+    const fontSize = Math.max(4, Math.round(Math.abs(d || a || item.height || 12) * 10) / 10);
+    const fontDescriptor = `${item.fontName} ${style?.fontFamily ?? ""}`.toLowerCase();
+    pageRuns.push({
+      id: `${pageIndex}-${itemIndex}`,
+      pageIndex,
+      original: item.str,
+      value: item.str,
+      x,
+      y,
+      width: Math.max(1, item.width),
+      height: Math.max(fontSize, item.height || fontSize),
+      fontSize,
+      originalFontSize: fontSize,
+      fontName: item.fontName,
+      fontFamily: style?.fontFamily || item.fontName,
+      fontPreset: "auto",
+      originalFontPreset: "auto",
+      isBold: isBoldFontDescriptor(fontDescriptor),
+      originalIsBold: isBoldFontDescriptor(fontDescriptor),
+      isItalic: isItalicFontDescriptor(fontDescriptor),
+      originalIsItalic: isItalicFontDescriptor(fontDescriptor),
+      isUnderline: false,
+      originalIsUnderline: false,
+      alignment: "left",
+      originalAlignment: "left",
+      matchOriginal: true,
+      textColor: defaultTextColor,
+      originalTextColor: defaultTextColor,
+      backgroundColor: defaultBackgroundColor,
+      originalBackgroundColor: defaultBackgroundColor,
+    });
+  });
+  return pageRuns;
+}
 
-        const fontSize = Math.max(4, Math.round(Math.abs(d || a || item.height || 12) * 10) / 10);
-        const fontDescriptor = `${item.fontName} ${style?.fontFamily ?? ""}`.toLowerCase();
-        pageRuns.push({
-          id: `${pageIndex}-${itemIndex}`,
-          pageIndex,
-          original: item.str,
-          value: item.str,
-          x,
-          y,
-          width: Math.max(1, item.width),
-          height: Math.max(fontSize, item.height || fontSize),
-          fontSize,
-          originalFontSize: fontSize,
-          fontName: item.fontName,
-          fontFamily: style?.fontFamily || item.fontName,
-          fontPreset: "auto",
-          originalFontPreset: "auto",
-          isBold: isBoldFontDescriptor(fontDescriptor),
-          originalIsBold: isBoldFontDescriptor(fontDescriptor),
-          isItalic: isItalicFontDescriptor(fontDescriptor),
-          originalIsItalic: isItalicFontDescriptor(fontDescriptor),
-          isUnderline: false,
-          originalIsUnderline: false,
-          alignment: "left",
-          originalAlignment: "left",
-          matchOriginal: true,
-          textColor: defaultTextColor,
-          originalTextColor: defaultTextColor,
-          backgroundColor: defaultBackgroundColor,
-          originalBackgroundColor: defaultBackgroundColor,
-        });
-      });
-      const viewport = page.getViewport({ scale: appearanceScale });
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) throw new Error("The browser canvas could not be started.");
-      await page.render({ canvas, canvasContext: context, viewport }).promise;
-      pageRuns.forEach((run) => {
-        const appearance = sampleRunAppearance(context, run, appearanceScale);
-        Object.assign(run, appearance, {
-          originalTextColor: appearance.textColor,
-          originalBackgroundColor: appearance.backgroundColor,
-        });
-      });
-      runs.push(...pageRuns);
-    }
-  } finally {
-    pdf.cleanup();
+async function renderEditorPageSurface(page: PDFPageProxy, session: EditorPdfSession, timeoutMs: number) {
+  const { originalViewport, viewport } = editorRenderViewport(page);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    canvas.width = 0;
+    canvas.height = 0;
+    throw new Error("The browser canvas could not be started.");
   }
 
-  return runs;
+  const renderTask = page.render({ canvas, canvasContext: context, viewport, background: "white" });
+  session.renderTasks.add(renderTask);
+  try {
+    await withPdfEditorWatchdog(renderTask.promise, "Rendering the PDF page", timeoutMs);
+    if (session.cancelled) throw new Error("PDF editor loading was cancelled.");
+    if (typeof window.createImageBitmap === "function") {
+      const bitmap = await withPdfEditorWatchdog(window.createImageBitmap(canvas), "Preparing the PDF preview", timeoutMs);
+      canvas.width = 0;
+      canvas.height = 0;
+      return { surface: bitmap as EditorPageSurface, width: originalViewport.width, height: originalViewport.height };
+    }
+    return { surface: canvas as EditorPageSurface, width: originalViewport.width, height: originalViewport.height };
+  } catch (error) {
+    renderTask.cancel();
+    canvas.width = 0;
+    canvas.height = 0;
+    throw error;
+  } finally {
+    session.renderTasks.delete(renderTask);
+  }
 }
 
 function matchingStandardFont(run: EditableTextRun) {
@@ -777,6 +908,10 @@ export default function PdfToolsPage() {
   const [metadata, setMetadata] = useState<MetadataFields>({ title: "", author: "", subject: "", keywords: "" });
   const [editableTextRuns, setEditableTextRuns] = useState<EditableTextRun[]>([]);
   const [editablePdfPages, setEditablePdfPages] = useState<EditablePdfPage[]>([]);
+  const [editorPageCount, setEditorPageCount] = useState(0);
+  const [editorLoadingMessage, setEditorLoadingMessage] = useState("");
+  const [editorLoadError, setEditorLoadError] = useState("");
+  const [editorReloadToken, setEditorReloadToken] = useState(0);
   const [selectedTextRunId, setSelectedTextRunId] = useState<string | null>(null);
   const [textEditHistory, setTextEditHistory] = useState<TextEditHistory>({ runId: null, snapshots: [], position: -1 });
   const [toolbarPosition, setToolbarPosition] = useState<ToolbarPosition>({ runId: null, left: 0 });
@@ -795,6 +930,10 @@ export default function PdfToolsPage() {
   const externalDragDepth = useRef(0);
   const toolMenuRef = useRef<HTMLElement | null>(null);
   const workingEditorPdfBytes = useRef<Uint8Array | null>(null);
+  const editorPdfSessionRef = useRef<EditorPdfSession | null>(null);
+  const editorSessionIdRef = useRef(0);
+  const editorPreviewCanvasRefs = useRef<Record<number, HTMLCanvasElement | null>>({});
+  const pendingEditorScrollPageRef = useRef<number | null>(null);
   const editorPageRefs = useRef<Record<number, HTMLElement | null>>({});
   const editorCanvasRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const activeTextEditorRef = useRef<HTMLDivElement | null>(null);
@@ -895,7 +1034,7 @@ export default function PdfToolsPage() {
   }, [activeTool, files]);
 
   useEffect(() => {
-    if (!isPreparingFiles && !isWorking) return;
+    if (activeTool === "textEdit" || (!isPreparingFiles && !isWorking)) return;
 
     const progressLimit = 99;
     const timer = window.setInterval(() => {
@@ -903,7 +1042,7 @@ export default function PdfToolsPage() {
     }, 120);
 
     return () => window.clearInterval(timer);
-  }, [isPreparingFiles, isWorking]);
+  }, [activeTool, isPreparingFiles, isWorking]);
 
   useEffect(() => {
     if (activeTool !== "metadata" || !files[0]) return;
@@ -926,46 +1065,239 @@ export default function PdfToolsPage() {
     };
   }, [activeTool, files]);
 
+  function isCurrentEditorSession(session: EditorPdfSession) {
+    return editorPdfSessionRef.current === session && !session.cancelled;
+  }
+
+  function clearEditorPreviewCanvases() {
+    Object.values(editorPreviewCanvasRefs.current).forEach((canvas) => {
+      if (!canvas) return;
+      canvas.width = 0;
+      canvas.height = 0;
+    });
+    editorPreviewCanvasRefs.current = {};
+    editorPageRefs.current = {};
+    editorCanvasRefs.current = {};
+  }
+
+  function cancelEditorSession() {
+    const session = editorPdfSessionRef.current;
+    editorPdfSessionRef.current = null;
+    pendingEditorScrollPageRef.current = null;
+    clearEditorPreviewCanvases();
+    if (session) void destroyEditorPdfSession(session);
+  }
+
+  function paintEditorPagePreview(pageIndex: number, canvas: HTMLCanvasElement | null) {
+    if (!canvas) return;
+    const surface = editorPdfSessionRef.current?.surfaces.get(pageIndex);
+    if (!surface) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    canvas.width = surface.width;
+    canvas.height = surface.height;
+    context.drawImage(surface, 0, 0);
+  }
+
+  function setEditorPreviewCanvas(pageIndex: number, canvas: HTMLCanvasElement | null) {
+    editorPreviewCanvasRefs.current[pageIndex] = canvas;
+    paintEditorPagePreview(pageIndex, canvas);
+  }
+
+  function publishEditorPage(
+    session: EditorPdfSession,
+    page: EditablePdfPage,
+    runs: EditableTextRun[],
+    surface: EditorPageSurface,
+    initial = false,
+  ) {
+    if (!isCurrentEditorSession(session)) {
+      releaseEditorPageSurface(surface);
+      return;
+    }
+    session.surfaces.set(page.pageIndex, surface);
+    setEditablePdfPages((current) => current.some((item) => item.pageIndex === page.pageIndex)
+      ? current
+      : [...current, page].sort((first, second) => first.pageIndex - second.pageIndex));
+    if (initial) {
+      setEditableTextRuns(runs);
+      setSelectedTextRunId(runs[0]?.id ?? null);
+      setTextEditHistory(runs[0]
+        ? { runId: runs[0].id, snapshots: [textRunEditSnapshot(runs[0])], position: 0 }
+        : { runId: null, snapshots: [], position: -1 });
+    } else {
+      setEditableTextRuns((current) => [...current, ...runs]);
+    }
+
+    if (pendingEditorScrollPageRef.current === page.pageIndex) {
+      requestAnimationFrame(() => {
+        editorPageRefs.current[page.pageIndex]?.scrollIntoView({ behavior: "smooth", block: "start" });
+        pendingEditorScrollPageRef.current = null;
+      });
+    }
+  }
+
+  async function prepareEditorPage(session: EditorPdfSession, pageIndex: number, timeoutMs: number) {
+    const pdf = session.pdf;
+    if (!pdf || session.cancelled) throw new Error("PDF editor loading was cancelled.");
+    const page = await withPdfEditorWatchdog(pdf.getPage(pageIndex + 1), `Opening page ${pageIndex + 1}`, timeoutMs);
+    try {
+      const content = await withPdfEditorWatchdog(page.getTextContent(), `Reading text on page ${pageIndex + 1}`, timeoutMs);
+      if (session.cancelled) throw new Error("PDF editor loading was cancelled.");
+      const runs = editableTextRunsFromContent(pageIndex, content);
+      const preview = await renderEditorPageSurface(page, session, timeoutMs);
+      return {
+        page: { pageIndex, width: preview.width, height: preview.height },
+        runs,
+        surface: preview.surface,
+      };
+    } finally {
+      page.cleanup();
+    }
+  }
+
+  function scheduleNextBackgroundEditorPage(session: EditorPdfSession) {
+    if (!isCurrentEditorSession(session) || session.backgroundStopped || session.backgroundTimer !== null || !session.pageCount) return;
+    const nextPageIndex = Array.from({ length: session.pageCount }, (_, index) => index).find((index) => !session.surfaces.has(index)
+      && !session.queuedPageIndexes.has(index) && !session.renderingPageIndexes.has(index));
+    if (nextPageIndex === undefined) return;
+
+    session.backgroundTimer = window.setTimeout(() => {
+      session.backgroundTimer = null;
+      requestEditorPage(nextPageIndex);
+    }, 400);
+  }
+
+  async function drainEditorPageQueue(session: EditorPdfSession) {
+    if (session.queueRunning) return;
+    session.queueRunning = true;
+    try {
+      while (isCurrentEditorSession(session) && session.queuedPages.length) {
+        const pageIndex = session.queuedPages.shift();
+        if (pageIndex === undefined) continue;
+        session.queuedPageIndexes.delete(pageIndex);
+        if (session.surfaces.has(pageIndex)) continue;
+        session.renderingPageIndexes.add(pageIndex);
+        try {
+          const prepared = await prepareEditorPage(session, pageIndex, PDF_EDITOR_BACKGROUND_STAGE_TIMEOUT_MS);
+          publishEditorPage(session, prepared.page, prepared.runs, prepared.surface);
+        } catch (caughtError) {
+          if (!isPdfEditorCancellation(session, caughtError) && isCurrentEditorSession(session)) {
+            session.backgroundStopped = true;
+            session.queuedPages = [];
+            session.queuedPageIndexes.clear();
+            setEditorLoadError(`Page ${pageIndex + 1} could not be prepared. Retry the PDF to try again.`);
+            if (editorPdfSessionRef.current === session) editorPdfSessionRef.current = null;
+            void destroyEditorPdfSession(session);
+          }
+          break;
+        } finally {
+          session.renderingPageIndexes.delete(pageIndex);
+        }
+        await yieldToBrowser();
+      }
+    } finally {
+      session.queueRunning = false;
+      scheduleNextBackgroundEditorPage(session);
+    }
+  }
+
+  function requestEditorPage(pageIndex: number, priority = false) {
+    const session = editorPdfSessionRef.current;
+    if (!session || !isCurrentEditorSession(session) || pageIndex < 0 || pageIndex >= session.pageCount || session.surfaces.has(pageIndex)
+      || session.queuedPageIndexes.has(pageIndex) || session.renderingPageIndexes.has(pageIndex)) return;
+    session.queuedPageIndexes.add(pageIndex);
+    if (priority) session.queuedPages.unshift(pageIndex);
+    else session.queuedPages.push(pageIndex);
+    void drainEditorPageQueue(session);
+  }
+
   useEffect(() => {
     if (activeTool !== "textEdit" || !files[0]) return;
-    let cancelled = false;
 
-    async function loadEditor() {
-      let pages: EditablePdfPage[] = [];
+    const sourceFile = files[0];
+    const session = createEditorPdfSession(++editorSessionIdRef.current);
+    editorPdfSessionRef.current = session;
+
+    async function loadInitialEditorPage() {
       try {
-        const sourceBytes = new Uint8Array(await files[0].arrayBuffer());
-        if (cancelled) return;
-        workingEditorPdfBytes.current = copyBytes(sourceBytes);
-        const [runs, renderedPages] = await Promise.all([getEditableTextRuns(sourceBytes), renderEditablePdfPages(sourceBytes)]);
-        pages = renderedPages;
-        if (cancelled) return;
-        setEditableTextRuns(runs);
-        setEditablePdfPages(renderedPages);
-        setSelectedTextRunId(runs[0]?.id ?? null);
-        setTextEditHistory(runs[0]
-          ? { runId: runs[0].id, snapshots: [textRunEditSnapshot(runs[0])], position: 0 }
-          : { runId: null, snapshots: [], position: -1 });
-      } catch (caughtError) {
-        if (!cancelled) setError(caughtError instanceof Error ? caughtError.message : "The PDF text could not be read.");
-      } finally {
-        if (cancelled) pages.forEach((page) => URL.revokeObjectURL(page.imageUrl));
-        if (!cancelled) {
-          setIsTextEditorLoading(false);
-          setIsPreparingFiles(false);
+        const sourceBytes = workingEditorPdfBytes.current ?? new Uint8Array(await withPdfEditorWatchdog(sourceFile.arrayBuffer(), "Reading the selected file", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS));
+        if (!isCurrentEditorSession(session)) return;
+        workingEditorPdfBytes.current = sourceBytes;
+        setProgressPercent(10);
+        setEditorLoadingMessage("File read. Starting the PDF.js worker.");
+
+        const pdfjs = await withPdfEditorWatchdog(loadPdfJs(), "Loading PDF.js", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+        if (!isCurrentEditorSession(session)) return;
+        setProgressPercent(20);
+        const worker = new pdfjs.PDFWorker();
+        session.worker = worker;
+        await withPdfEditorWatchdog(worker.promise, "Starting the PDF.js worker", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+        if (!isCurrentEditorSession(session)) return;
+
+        const loadingTask = pdfjs.getDocument({ data: copyBytes(sourceBytes), worker });
+        session.loadingTask = loadingTask;
+        const pdf = await withPdfEditorWatchdog(loadingTask.promise, "Opening the PDF", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+        if (!isCurrentEditorSession(session)) return;
+        session.pdf = pdf;
+        session.pageCount = pdf.numPages;
+        setEditorPageCount(pdf.numPages);
+        setProgressPercent(30);
+        setEditorLoadingMessage(`PDF opened. Reading text on page 1 of ${pdf.numPages}.`);
+
+        const firstPage = await withPdfEditorWatchdog(pdf.getPage(1), "Opening page 1", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+        let prepared: { page: EditablePdfPage; runs: EditableTextRun[]; surface: EditorPageSurface } | null = null;
+        try {
+          const content = await withPdfEditorWatchdog(firstPage.getTextContent(), "Reading text on page 1", PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+          if (!isCurrentEditorSession(session)) return;
+          setProgressPercent(50);
+          setEditorLoadingMessage("First-page text is ready. Rendering its preview.");
+          const preview = await renderEditorPageSurface(firstPage, session, PDF_EDITOR_INITIAL_STAGE_TIMEOUT_MS);
+          prepared = { page: { pageIndex: 0, width: preview.width, height: preview.height }, runs: editableTextRunsFromContent(0, content), surface: preview.surface };
+        } finally {
+          firstPage.cleanup();
         }
+        if (!prepared || !isCurrentEditorSession(session)) {
+          if (prepared?.surface) releaseEditorPageSurface(prepared.surface);
+          return;
+        }
+
+        setProgressPercent(70);
+        setEditorLoadingMessage("First-page preview is ready. Opening your editor.");
+        publishEditorPage(session, prepared.page, prepared.runs, prepared.surface, true);
+        setProgressPercent(100);
+        setEditorLoadingMessage("");
+        setIsTextEditorLoading(false);
+        setIsPreparingFiles(false);
+        scheduleNextBackgroundEditorPage(session);
+      } catch (caughtError) {
+        if (isPdfEditorCancellation(session, caughtError) || !isCurrentEditorSession(session)) return;
+        const rawMessage = caughtError instanceof Error ? caughtError.message : "The PDF text editor could not be opened.";
+        const message = /worker|fake worker|import/i.test(rawMessage)
+          ? "The PDF worker could not start. Check browser extensions or security settings, then retry."
+          : rawMessage;
+        setEditorLoadError(message);
+        setIsTextEditorLoading(false);
+        setIsPreparingFiles(false);
+        if (editorPdfSessionRef.current === session) editorPdfSessionRef.current = null;
+        void destroyEditorPdfSession(session);
       }
     }
 
-    void loadEditor();
-
+    void loadInitialEditorPage();
     return () => {
-      cancelled = true;
+      if (editorPdfSessionRef.current === session) editorPdfSessionRef.current = null;
+      void destroyEditorPdfSession(session);
     };
-  }, [activeTool, files]);
+    // The lifecycle is deliberately restarted only for a file, tool, or explicit retry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool, editorReloadToken, files]);
 
   useEffect(() => () => {
-    editablePdfPages.forEach((page) => URL.revokeObjectURL(page.imageUrl));
-  }, [editablePdfPages]);
+    const session = editorPdfSessionRef.current;
+    editorPdfSessionRef.current = null;
+    if (session) void destroyEditorPdfSession(session);
+  }, []);
 
   useEffect(() => {
     const reportDownload = (event: Event) => {
@@ -1034,6 +1366,7 @@ export default function PdfToolsPage() {
 
   function selectTool(tool: Tool) {
     if (tool === activeTool) return;
+    cancelEditorSession();
     trackToolSelection("/pdf-tools", "pdf_tools", tool);
     setActiveTool(tool);
     if (tool === "resizeDecrease") setResizePercentage(75);
@@ -1044,6 +1377,9 @@ export default function PdfToolsPage() {
     setDraggedFileIndex(null);
     setEditableTextRuns([]);
     setEditablePdfPages([]);
+    setEditorPageCount(0);
+    setEditorLoadingMessage("");
+    setEditorLoadError("");
     setSelectedTextRunId(null);
     setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setTextEditorQuery("");
@@ -1060,8 +1396,28 @@ export default function PdfToolsPage() {
   function startTextRunEdit(id: string) {
     const run = editableTextRuns.find((item) => item.id === id);
     if (!run) return;
+    let editableRun = run;
+    const page = editablePdfPages.find((item) => item.pageIndex === run.pageIndex);
+    const previewCanvas = editorPreviewCanvasRefs.current[run.pageIndex];
+    if (page && previewCanvas) {
+      const appearance = sampleRunAppearanceFromPreview(previewCanvas, page, run);
+      if (appearance) {
+        editableRun = {
+          ...run,
+          ...appearance,
+          originalTextColor: appearance.textColor,
+          originalBackgroundColor: appearance.backgroundColor,
+        };
+        setEditableTextRuns((current) => current.map((item) => item.id === id ? {
+          ...item,
+          ...appearance,
+          originalTextColor: appearance.textColor,
+          originalBackgroundColor: appearance.backgroundColor,
+        } : item));
+      }
+    }
     setSelectedTextRunId(id);
-    setTextEditHistory({ runId: id, snapshots: [textRunEditSnapshot(run)], position: 0 });
+    setTextEditHistory({ runId: id, snapshots: [textRunEditSnapshot(editableRun)], position: 0 });
   }
 
   function updateTextRunState(id: string, updates: Partial<TextRunEditSnapshot>) {
@@ -1213,14 +1569,24 @@ export default function PdfToolsPage() {
   }
 
   function scrollToEditorPage(pageIndex: number) {
-    editorPageRefs.current[pageIndex]?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const page = editorPageRefs.current[pageIndex];
+    if (page) {
+      page.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    pendingEditorScrollPageRef.current = pageIndex;
+    requestEditorPage(pageIndex, true);
   }
 
   function clearSelectedFiles() {
+    cancelEditorSession();
     setFiles([]);
     setThumbnails({});
     setEditableTextRuns([]);
     setEditablePdfPages([]);
+    setEditorPageCount(0);
+    setEditorLoadingMessage("");
+    setEditorLoadError("");
     setSelectedTextRunId(null);
     setTextEditHistory({ runId: null, snapshots: [], position: -1 });
     setIsTextEditorLoading(false);
@@ -1235,10 +1601,14 @@ export default function PdfToolsPage() {
   }
 
   function removeFile(fileIndex: number) {
+    if (activeTool === "textEdit") cancelEditorSession();
     setFiles((current) => current.filter((_, index) => index !== fileIndex));
     if (activeTool === "textEdit") {
       setEditableTextRuns([]);
       setEditablePdfPages([]);
+      setEditorPageCount(0);
+      setEditorLoadingMessage("");
+      setEditorLoadError("");
       setSelectedTextRunId(null);
       setTextEditHistory({ runId: null, snapshots: [], position: -1 });
       setIsTextEditorLoading(false);
@@ -1260,12 +1630,16 @@ export default function PdfToolsPage() {
     if (invalid) {
       setError(isImageInput ? "Please select JPG or PNG images only." : activeTool === "wordToPdf" ? "Please select a DOCX file." : activeTool === "excelToPdf" ? "Please select an XLSX or XLS file." : activeTool === "powerpointToPdf" ? "Please select a PPTX file." : "Please select a valid PDF file.");
     } else if (added.length) {
+      if (activeTool === "textEdit") cancelEditorSession();
       setIsPreparingFiles(true);
-      setProgressPercent(5);
+      setProgressPercent(activeTool === "textEdit" ? 0 : 5);
       if (activeTool === "textEdit") {
         setIsTextEditorLoading(true);
         setEditableTextRuns([]);
         setEditablePdfPages([]);
+        setEditorPageCount(0);
+        setEditorLoadingMessage("File selected. Preparing a local PDF editor.");
+        setEditorLoadError("");
         setSelectedTextRunId(null);
         setTextEditHistory({ runId: null, snapshots: [], position: -1 });
         workingEditorPdfBytes.current = null;
@@ -1274,6 +1648,22 @@ export default function PdfToolsPage() {
       setError("");
       setStatus("");
     }
+  }
+
+  function retryTextEditor() {
+    if (!files[0] || activeTool !== "textEdit") return;
+    cancelEditorSession();
+    setEditableTextRuns([]);
+    setEditablePdfPages([]);
+    setEditorPageCount(0);
+    setSelectedTextRunId(null);
+    setTextEditHistory({ runId: null, snapshots: [], position: -1 });
+    setEditorLoadError("");
+    setEditorLoadingMessage("Retrying the PDF editor locally.");
+    setProgressPercent(0);
+    setIsTextEditorLoading(true);
+    setIsPreparingFiles(true);
+    setEditorReloadToken((current) => current + 1);
   }
 
   function handleFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -1492,23 +1882,8 @@ export default function PdfToolsPage() {
 
         const savedBytes = await textEditedPdf.save({ useObjectStreams: true });
         workingEditorPdfBytes.current = copyBytes(savedBytes);
+        setProgressPercent(80);
         downloadPdf(savedBytes, outputName(sourceFile.name, "text-corrected"));
-        const refreshedPages = await renderEditablePdfPages(savedBytes);
-        setEditablePdfPages(refreshedPages);
-        setEditableTextRuns((current) => current.map((run) => ({
-          ...run,
-          original: run.value,
-          originalFontPreset: run.fontPreset,
-          originalFontSize: run.fontSize,
-          originalIsBold: run.isBold,
-          originalIsItalic: run.isItalic,
-          originalIsUnderline: run.isUnderline,
-          originalAlignment: run.alignment,
-          originalTextColor: run.textColor,
-          originalBackgroundColor: run.backgroundColor,
-          matchOriginal: true,
-        })));
-        setTextEditHistory({ runId: null, snapshots: [], position: -1 });
         completeSuccessfulDownload(`${changedRuns.length} text correction${changedRuns.length === 1 ? "" : "s"} was saved and removed from the change history.`);
         return;
       }
@@ -1766,9 +2141,9 @@ export default function PdfToolsPage() {
           {!usesLargeUploadPanel && <><h2 data-no-translate className="text-2xl font-bold text-slate-950">{activeDetails.title}</h2><p data-no-translate className="mt-2 text-slate-600">{activeDetails.description}</p></>}
 
           {activeTool === "textEdit" && files.length ? <section className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 shadow-sm">
-            <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-700">Editing locally</p><p className="mt-1 truncate font-bold text-slate-900" title={files[0].name}>{files[0].name}</p><p data-no-translate className="mt-1 text-xs text-slate-600">{editablePdfPages.length ? `${editablePdfPages.length} pages · ${formatBytes(files[0].size)}` : "Preparing PDF preview..."}</p></div>
+            <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-700">Editing locally</p><p className="mt-1 truncate font-bold text-slate-900" title={files[0].name}>{files[0].name}</p><p data-no-translate className="mt-1 text-xs text-slate-600">{editorPageCount ? `${editablePdfPages.length} of ${editorPageCount} pages ready · ${formatBytes(files[0].size)}` : "Preparing PDF preview..."}</p></div>
             <div className="flex shrink-0 items-center gap-2"><label className="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700">Replace PDF<input className="sr-only" type="file" accept={accept} onChange={handleFiles} /></label><button type="button" onClick={clearSelectedFiles} className="rounded-lg px-3 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 hover:text-blue-900">Close</button></div>
-            {isPreparingFiles && <div className="basis-full"><ProgressMeter title="Preparing your PDF" message="Reading the selected file and preparing its local preview." progress={progressPercent} /></div>}
+            {isPreparingFiles && <div className="basis-full"><ProgressMeter title="Preparing your PDF" message={editorLoadingMessage || "Preparing the first editable page locally."} progress={progressPercent} /></div>}
           </section> : <div
             onDragEnter={(event) => {
               if (!Array.from(event.dataTransfer.types).includes("Files")) return;
@@ -1886,15 +2261,18 @@ export default function PdfToolsPage() {
             </>}
           </section>}
           {activeTool === "textEdit" && <section className="mt-5">
-            {isTextEditorLoading && <div className="flex min-h-80 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center"><div><p className="text-lg font-bold text-slate-900">Opening your PDF editor...</p><p className="mt-2 text-sm text-slate-600">Rendering every page and its editable text.</p></div></div>}
-            {!isTextEditorLoading && files.length > 0 && editableTextRuns.length === 0 && <>{error && <p role="alert" className="mb-3 rounded-2xl bg-red-50 p-4 text-sm font-medium text-red-800">{error}</p>}<p className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-950">No straight, selectable text was found. Scanned PDFs need OCR first, and rotated text is not included in this editor.</p></>}
-            {!isTextEditorLoading && files.length > 0 && editableTextRuns.length > 0 && <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+            {isTextEditorLoading && <div className="flex min-h-80 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center"><div><p className="text-lg font-bold text-slate-900">Opening your PDF editor...</p><p className="mt-2 text-sm text-slate-600">{editorLoadingMessage || "Preparing the first editable page."}</p></div></div>}
+            {!isTextEditorLoading && editorLoadError && <div role="alert" className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-5 text-sm leading-6 text-red-900"><p className="font-bold">The PDF editor could not finish loading.</p><p className="mt-1">{editorLoadError}</p><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={retryTextEditor} className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-800">Retry</button><button type="button" onClick={clearSelectedFiles} className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm font-bold text-red-800 transition hover:bg-red-100">Choose another PDF</button></div></div>}
+            {!isTextEditorLoading && files.length > 0 && editablePdfPages.length === 0 && !editorLoadError && <p className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-950">The PDF opened but no page preview is available yet. Retry the editor or choose another PDF.</p>}
+            {!isTextEditorLoading && files.length > 0 && editablePdfPages.length > 0 && <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
               <section aria-label="PDF page editor" className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3"><div><h3 className="font-bold text-slate-950">PDF pages</h3><p className="mt-1 text-xs text-slate-600">Click a line to edit it directly; its colour and background are sampled automatically.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{editablePdfPages.length} pages - {editableTextRuns.length} text items</span></div>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3"><div><h3 className="font-bold text-slate-950">PDF pages</h3><p className="mt-1 text-xs text-slate-600">Click a line to edit it directly. Its appearance is sampled only when you begin editing it.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{editablePdfPages.length} of {editorPageCount} pages ready - {editableTextRuns.length} text items</span></div>
+                {editablePdfPages.length < editorPageCount && <p role="status" className="border-b border-slate-200 bg-blue-50 px-4 py-2 text-xs text-blue-900">Remaining pages are loading in the background. Select a page number to prioritize it.</p>}
+                {editableTextRuns.length === 0 && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950">No straight, selectable text was found on the loaded pages. Scanned PDFs need OCR first, and rotated text is not included in this editor.</p>}
                 <div className="max-h-[calc(100vh-15.5rem)] min-h-[34rem] overflow-y-auto overscroll-contain p-3 sm:p-5">
                   {editablePdfPages.map((page) => <article key={page.pageIndex} ref={(element) => { editorPageRefs.current[page.pageIndex] = element; }} className="mx-auto mb-8 w-full max-w-[58rem] scroll-mt-5 last:mb-0">
                     <div ref={(element) => { editorCanvasRefs.current[page.pageIndex] = element; }} className="relative rounded-lg bg-white shadow-md [container-type:inline-size]">
-                      <img src={page.imageUrl} alt={`PDF page ${page.pageIndex + 1}`} className="block h-auto w-full select-none rounded-lg" draggable={false} />
+                      <canvas ref={(element) => setEditorPreviewCanvas(page.pageIndex, element)} aria-label={`PDF page ${page.pageIndex + 1}`} role="img" className="block h-auto w-full select-none rounded-lg" />
                       <div className="absolute inset-0">
                         {editableTextRuns.filter((run) => run.pageIndex === page.pageIndex).map((run) => {
                           const isSelected = selectedTextRunId === run.id;
@@ -1934,14 +2312,14 @@ export default function PdfToolsPage() {
                         })}
                       </div>
                     </div>
-                    <p className="mt-2 text-center text-xs font-bold text-slate-500">Page {page.pageIndex + 1} of {editablePdfPages.length}</p>
+                    <p className="mt-2 text-center text-xs font-bold text-slate-500">Page {page.pageIndex + 1} of {editorPageCount}</p>
                   </article>)}
                 </div>
               </section>
 
               <aside className="min-w-0 self-start xl:sticky xl:top-4">
                 <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                  <div className="border-b border-slate-200 px-4 py-4"><div className="flex items-center justify-between gap-3"><div><h3 className="font-bold text-slate-950">Edit and changes</h3><p className="mt-1 text-xs text-slate-600">Changes stay here until you save.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{textChangeCount}</span></div><label className="mt-4 block"><span className="sr-only">Find text</span><input value={textEditorQuery} onChange={(event) => setTextEditorQuery(event.target.value)} placeholder="Find text in this PDF" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>{textEditorQuery.trim() && <p data-no-translate className="mt-2 text-xs font-semibold text-slate-600">{visibleTextRuns.length} matching text item{visibleTextRuns.length === 1 ? "" : "s"}</p>}<div className="mt-3 flex flex-wrap gap-1">{editablePdfPages.map((page) => <button key={page.pageIndex} type="button" onClick={() => scrollToEditorPage(page.pageIndex)} className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-700 transition hover:bg-blue-100 hover:text-blue-800">P{page.pageIndex + 1}</button>)}</div></div>
+                  <div className="border-b border-slate-200 px-4 py-4"><div className="flex items-center justify-between gap-3"><div><h3 className="font-bold text-slate-950">Edit and changes</h3><p className="mt-1 text-xs text-slate-600">Changes stay here until you save.</p></div><span data-no-translate className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800">{textChangeCount}</span></div><label className="mt-4 block"><span className="sr-only">Find text</span><input value={textEditorQuery} onChange={(event) => setTextEditorQuery(event.target.value)} placeholder="Find text in this PDF" className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>{textEditorQuery.trim() && <p data-no-translate className="mt-2 text-xs font-semibold text-slate-600">{visibleTextRuns.length} matching text item{visibleTextRuns.length === 1 ? "" : "s"}</p>}<div className="mt-3 flex flex-wrap gap-1">{Array.from({ length: editorPageCount }, (_, pageIndex) => <button key={pageIndex} type="button" onClick={() => scrollToEditorPage(pageIndex)} className={`rounded-md px-2 py-1 text-xs font-bold transition ${editablePdfPages.some((page) => page.pageIndex === pageIndex) ? "bg-slate-100 text-slate-700 hover:bg-blue-100 hover:text-blue-800" : "bg-blue-50 text-blue-700 hover:bg-blue-100"}`}>P{pageIndex + 1}</button>)}</div></div>
                   <div className="border-t border-slate-200 bg-blue-50/50 p-4">
                     {selectedTextRun ? <><p className="text-xs font-bold uppercase tracking-wide text-blue-800">Editing on page {selectedTextRun.pageIndex + 1}</p><p className="mt-1 text-sm leading-5 text-slate-600">Use the floating editor on the PDF itself. Font, size, text colour and background can be corrected there.</p><button type="button" onClick={() => setSelectedTextRunId(null)} className="mt-3 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50">Close editor</button></> : <p className="text-sm leading-6 text-slate-500">Click any text directly in the PDF. Its editor will open beside that line.</p>}
                   </div>
