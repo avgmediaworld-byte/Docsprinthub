@@ -13,17 +13,25 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-# Keep the runtime image small and non-interactive. libreoffice-writer pulls
-# only the Writer conversion components required for DOCX-to-PDF; the desktop
-# launchers and optional office applications are not installed explicitly.
+# Keep the runtime image small and non-interactive. The font set provides
+# metric-compatible fallbacks for common Office fonts (notably Arial and Times
+# New Roman) so Writer does not reflow DOCX content merely because Microsoft
+# fonts are unavailable in Linux. No desktop launchers or optional office apps
+# are installed explicitly.
 FROM node:20-bookworm-slim AS runtime
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
       ca-certificates \
+      fontconfig \
+      fonts-crosextra-caladea \
+      fonts-crosextra-carlito \
       fonts-dejavu-core \
+      fonts-liberation2 \
+      fonts-noto-core \
       libreoffice-core \
       libreoffice-writer \
+    && fc-cache --force \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/libreoffice-worker

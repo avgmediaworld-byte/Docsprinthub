@@ -54,13 +54,24 @@ The older `LO_WORKER_*` names remain accepted for local POC compatibility, but n
 
 ## Container deployment POC
 
-The included Dockerfile packages only this isolated worker, Node.js 20, and the non-interactive LibreOffice Writer conversion components. It uses Debian's `libreoffice-core` and `libreoffice-writer` packages with `--no-install-recommends`; no LibreOffice desktop application is launched. The service runs as an unprivileged `worker` user and uses `soffice` on `PATH` through `LIBREOFFICE_PATH=soffice`.
+The included Dockerfile packages only this isolated worker, Node.js 20, and the non-interactive LibreOffice Writer conversion components. It uses Debian's `libreoffice-core` and `libreoffice-writer` packages with `--no-install-recommends`; no LibreOffice desktop application is launched. It also installs Fontconfig plus DejaVu, Liberation, Carlito, Caladea, and Noto Core fonts, then rebuilds the Fontconfig cache during the image build.
+
+Those fonts are intentionally part of layout fidelity, not cosmetic extras: Liberation provides metric-compatible fallbacks for Arial and Times New Roman, while Carlito and Caladea cover common Calibri/Cambria documents. This reduces pagination changes when source Microsoft fonts cannot be redistributed in the image. The service runs as an unprivileged `worker` user and uses `soffice` on `PATH` through `LIBREOFFICE_PATH=soffice`.
 
 Build from the repository root:
 
 ```bash
 docker build --tag docsprinthub-libreoffice-worker:local tools/libreoffice-worker
 ```
+
+After building, inspect the effective substitutions if a document's pagination differs from its source environment:
+
+```bash
+docker run --rm --entrypoint fc-match docsprinthub-libreoffice-worker:local Arial
+docker run --rm --entrypoint fc-match docsprinthub-libreoffice-worker:local "Times New Roman"
+```
+
+Both commands should resolve to installed metric-compatible fallbacks rather than an arbitrary DejaVu face.
 
 Run it with explicit resource limits appropriate to the host. The container has no persistent document storage; the existing worker creates and deletes unique job directories and LibreOffice profiles in the container's `/tmp` filesystem.
 
