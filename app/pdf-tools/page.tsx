@@ -406,7 +406,81 @@ function sampleRunAppearanceFromPreview(
   return { textColor: colorDistance(textColor, backgroundColor) < 24 ? defaultTextColor : textColor, backgroundColor };
 }
 
-async function convertDocxWithWorker(file: File) {
+type ProcessingProgress = (progress: number | null, message: string) => void;
+
+function readConversionErrorBody(blob: Blob) {
+  return blob.text().then((text) => {
+    try {
+      const body: unknown = JSON.parse(text);
+      return body && typeof body === "object" && "message" in body && typeof body.message === "string"
+        ? body.message
+        : null;
+    } catch {
+      return null;
+    }
+  }).catch(() => null);
+}
+
+function uploadDocxDirectly(
+  workerEndpoint: URL,
+  ticket: string,
+  file: File,
+  onProgress: ProcessingProgress,
+) {
+  return new Promise<Blob>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    let uploadFinished = false;
+    request.open("POST", workerEndpoint.toString());
+    request.responseType = "blob";
+    request.timeout = 150_000;
+    request.setRequestHeader("X-Conversion-Ticket", ticket);
+
+    request.upload.onloadstart = () => onProgress(25, "Uploading your DOCX securely to the conversion service...");
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable || !event.total) return;
+      onProgress(25 + (event.loaded / event.total) * 45, `Uploading your DOCX securely (${Math.round((event.loaded / event.total) * 100)}%)...`);
+    };
+    request.upload.onloadend = () => {
+      uploadFinished = true;
+      onProgress(null, "DOCX uploaded. Converting its layout securely...");
+    };
+    request.onprogress = (event) => {
+      if (!uploadFinished) return;
+      if (!event.lengthComputable || !event.total) {
+        onProgress(85, "Your PDF is ready. Downloading it...");
+        return;
+      }
+      onProgress(85 + (event.loaded / event.total) * 10, `Downloading your converted PDF (${Math.round((event.loaded / event.total) * 100)}%)...`);
+    };
+    request.onerror = () => reject(new Error("The document conversion service cannot be reached. Please try again shortly."));
+    request.ontimeout = () => reject(new Error("The document conversion took too long. Please try again with a smaller or simpler DOCX file."));
+    request.onload = async () => {
+      const response = request.response;
+      if (request.status < 200 || request.status >= 300 || !(response instanceof Blob)) {
+        const message = response instanceof Blob ? await readConversionErrorBody(response) : null;
+        reject(new Error(message ?? "The DOCX could not be converted. Please try again."));
+        return;
+      }
+      const responseType = request.getResponseHeader("Content-Type")?.toLowerCase() ?? "";
+      if (!responseType.startsWith("application/pdf")) {
+        reject(new Error("The conversion service returned an invalid PDF. Please try again."));
+        return;
+      }
+      if (response.size === 0) {
+        reject(new Error("The conversion service returned an empty PDF. Please try again."));
+        return;
+      }
+      onProgress(95, "PDF conversion complete. Preparing your download...");
+      resolve(response);
+    };
+
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    request.send(formData);
+  });
+}
+
+async function convertDocxWithWorker(file: File, onProgress: ProcessingProgress) {
   if (file.size > MAX_DOCX_CONVERSION_BYTES) {
     throw new Error("The DOCX file is larger than the 25 MiB conversion limit.");
   }
@@ -414,6 +488,7 @@ async function convertDocxWithWorker(file: File) {
   const mimeType = file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   let sessionResponse: Response;
   try {
+    onProgress(10, "Requesting a secure conversion session...");
     sessionResponse = await fetch("/api/conversion-sessions/docx-to-pdf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -445,35 +520,8 @@ async function convertDocxWithWorker(file: File) {
   } catch {
     throw new Error("The document conversion service is temporarily unavailable. Please try again shortly.");
   }
-
-  const formData = new FormData();
-  formData.append("file", file, file.name);
-  let response: Response;
-  try {
-    response = await fetch(workerEndpoint, {
-      method: "POST",
-      headers: { "X-Conversion-Ticket": ticket },
-      body: formData,
-      cache: "no-store",
-    });
-  } catch {
-    throw new Error("The document conversion service cannot be reached. Please try again shortly.");
-  }
-
-  if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const message = body && typeof body === "object" && "message" in body && typeof body.message === "string"
-      ? body.message
-      : "The DOCX could not be converted. Please try again.";
-    throw new Error(message);
-  }
-  if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/pdf")) {
-    throw new Error("The conversion service returned an invalid PDF. Please try again.");
-  }
-
-  const pdf = await response.blob();
-  if (pdf.size === 0) throw new Error("The conversion service returned an empty PDF. Please try again.");
-  return pdf;
+  onProgress(20, "Secure conversion session ready. Starting DOCX upload...");
+  return uploadDocxDirectly(workerEndpoint, ticket, file, onProgress);
 }
 
 function createEditorPdfSession(id: number): EditorPdfSession {
@@ -869,6 +917,7 @@ async function renderPdfPagesFromBytes(
   imageType: "image/png" | "image/jpeg" = "image/png",
   scale = 1.75,
   jpegQuality = 0.92,
+  onPageReady?: (completedPages: number, totalPages: number) => void,
 ) {
   const pdfjs = await loadPdfJs();
   const loadingTask = pdfjs.getDocument({ data: copyBytes(sourceBytes), password: password || undefined });
@@ -888,6 +937,7 @@ async function renderPdfPagesFromBytes(
       await page.render({ canvas, canvasContext: context, viewport }).promise;
       const blob = await canvasToBlob(canvas, imageType, imageType === "image/jpeg" ? jpegQuality : undefined);
       pages.push({ blob, bytes: new Uint8Array(await blob.arrayBuffer()), width: originalViewport.width, height: originalViewport.height });
+      onPageReady?.(number, pdf.numPages);
     }
   } finally {
     await pdf.cleanup();
@@ -902,11 +952,12 @@ async function renderPdfPages(
   imageType: "image/png" | "image/jpeg" = "image/png",
   scale = 1.75,
   jpegQuality = 0.92,
+  onPageReady?: (completedPages: number, totalPages: number) => void,
 ) {
-  return renderPdfPagesFromBytes(new Uint8Array(await file.arrayBuffer()), password, imageType, scale, jpegQuality);
+  return renderPdfPagesFromBytes(new Uint8Array(await file.arrayBuffer()), password, imageType, scale, jpegQuality, onPageReady);
 }
 
-async function extractPdfText(file: File, password = "") {
+async function extractPdfText(file: File, password = "", onPageReady?: (completedPages: number, totalPages: number) => void) {
   const pdfjs = await loadPdfJs();
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), password: password || undefined });
   const pdf = await loadingTask.promise;
@@ -915,6 +966,7 @@ async function extractPdfText(file: File, password = "") {
     for (let number = 1; number <= pdf.numPages; number += 1) {
       const content = await readPdfTextContent(await pdf.getPage(number));
       textPages.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" ").replace(/\s+/g, " ").trim());
+      onPageReady?.(number, pdf.numPages);
     }
   } finally {
     await pdf.cleanup();
@@ -1174,13 +1226,20 @@ async function excelPages(file: File): Promise<TextPdfPage[]> {
   return pages;
 }
 
-function downloadTextPdf(pages: TextPdfPage[], fileName: string, orientation: "portrait" | "landscape" = "portrait") {
+async function downloadTextPdf(
+  pages: TextPdfPage[],
+  fileName: string,
+  orientation: "portrait" | "landscape" = "portrait",
+  onParagraphWritten?: (completedParagraphs: number, totalParagraphs: number) => void,
+) {
   const pdf = new jsPDF({ orientation, unit: "pt", format: "a4", compress: true });
   const margin = 42;
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const lineHeight = 16;
   let isFirstPage = true;
+  const totalParagraphs = pages.reduce((total, page) => total + page.paragraphs.length, 0);
+  let completedParagraphs = 0;
 
   for (const page of pages) {
     if (!isFirstPage) pdf.addPage();
@@ -1207,6 +1266,9 @@ function downloadTextPdf(pages: TextPdfPage[], fileName: string, orientation: "p
       }
       pdf.text(lines, margin, y);
       y += lines.length * lineHeight + 7;
+      completedParagraphs += 1;
+      onParagraphWritten?.(completedParagraphs, totalParagraphs);
+      if (completedParagraphs % 20 === 0) await yieldToBrowser();
     }
   }
 
@@ -1222,11 +1284,12 @@ function blobDataUrl(blob: Blob) {
   });
 }
 
-function ProgressMeter({ title, message, progress }: { title: string; message: string; progress: number }) {
-  const displayedProgress = Math.round(Math.max(0, Math.min(100, progress)));
+function ProgressMeter({ title, message, progress }: { title: string; message: string; progress: number | null }) {
+  const isIndeterminate = progress === null;
+  const displayedProgress = isIndeterminate ? null : Math.round(Math.max(0, Math.min(100, progress)));
   return <div className="w-full rounded-xl border border-blue-200 bg-white p-4 text-left shadow-sm">
-    <div className="flex items-center justify-between gap-3"><p className="text-sm font-bold text-blue-950">{title}</p><span className="shrink-0 text-xs font-bold text-blue-700">Progress: {displayedProgress}%</span></div>
-    <div role="progressbar" aria-label={title} aria-valuemin={0} aria-valuemax={100} aria-valuenow={displayedProgress} className="mt-3 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div>
+    <div className="flex items-center justify-between gap-3"><p className="text-sm font-bold text-blue-950">{title}</p><span className="shrink-0 text-xs font-bold text-blue-700">{isIndeterminate ? "Working..." : `Progress: ${displayedProgress}%`}</span></div>
+    <div role="progressbar" aria-label={title} aria-valuemin={0} aria-valuemax={100} aria-valuenow={displayedProgress ?? undefined} aria-valuetext={isIndeterminate ? "Working" : undefined} className="mt-3 h-2 overflow-hidden rounded-full bg-blue-100"><div className={isIndeterminate ? "h-full w-1/3 animate-pulse rounded-full bg-blue-600" : "h-full rounded-full bg-blue-600 transition-[width] duration-200"} style={isIndeterminate ? undefined : { width: `${displayedProgress}%` }} /></div>
     <p className="mt-2 text-xs leading-5 text-slate-600">{message}</p>
   </div>;
 }
@@ -1268,7 +1331,7 @@ export default function PdfToolsPage() {
   const [error, setError] = useState("");
   const [isWorking, setIsWorking] = useState(false);
   const [isPreparingFiles, setIsPreparingFiles] = useState(false);
-  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressPercent, setProgressPercent] = useState<number | null>(0);
   const [isDragging, setIsDragging] = useState(false);
   const [draggedFileIndex, setDraggedFileIndex] = useState<number | null>(null);
   const externalDragDepth = useRef(0);
@@ -1293,6 +1356,13 @@ export default function PdfToolsPage() {
   const processingLocationNote = activeTool === "wordToPdf"
     ? "DOCX files are sent securely to the conversion service and deleted after processing."
     : "Files are processed locally in your browser.";
+  const preparationMessage = activeTool === "wordToPdf"
+    ? "Checking the selected DOCX before secure conversion."
+    : activeTool === "excelToPdf"
+      ? "Checking the selected workbook before conversion."
+      : activeTool === "powerpointToPdf"
+        ? "Checking the selected presentation before conversion."
+        : "Reading your file and creating a local preview. Large files can take a moment.";
   const usesLargeUploadPanel = activeTool === "merge" || activeTool === "split" || activeTool === "optimize" || usesConvertLayout || usesResizeLayout;
   const usesTallActionSidebar = activeTool === "split" || activeTool === "optimize";
   const usesCenteredActionSidebar = usesTallActionSidebar || usesConvertLayout || usesResizeLayout;
@@ -1324,6 +1394,11 @@ export default function PdfToolsPage() {
   const matchingTextRunIds = useMemo(() => new Set(visibleTextRuns.map((run) => run.id)), [visibleTextRuns]);
   const changedTextRuns = useMemo(() => editableTextRuns.filter(textRunHasChanges), [editableTextRuns]);
   const textChangeCount = changedTextRuns.length;
+
+  function updateProcessingProgress(progress: number | null, message: string) {
+    setProgressPercent(progress === null ? null : Math.max(0, Math.min(100, progress)));
+    setStatus(message);
+  }
 
   useLayoutEffect(() => {
     if (!selectedTextRun) return;
@@ -1359,40 +1434,35 @@ export default function PdfToolsPage() {
     if (activeTool === "textEdit") return;
     let cancelled = false;
 
-    if (!files.length) {
-      setIsPreparingFiles(false);
-      return;
-    }
+    if (!files.length) return;
 
-    Promise.all(files.map(async (file) => {
-      try {
-        const preview = file.type.startsWith("image/") ? await imageDataUrl(file) : await renderPdfThumbnail(file);
-        return [fileKey(file), preview] as const;
-      } catch {
-        return [fileKey(file), ""] as const;
-      }
-    })).then((items) => {
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      setProgressPercent(10);
+      const items = await Promise.all(files.map(async (file) => {
+        try {
+          const preview = file.type.startsWith("image/")
+            ? await imageDataUrl(file)
+            : file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
+              ? await renderPdfThumbnail(file)
+              : "";
+          return [fileKey(file), preview] as const;
+        } catch {
+          return [fileKey(file), ""] as const;
+        }
+      }));
       if (!cancelled) {
         setThumbnails(Object.fromEntries(items));
+        setProgressPercent(100);
         setIsPreparingFiles(false);
       }
-    });
+    })();
 
     return () => {
       cancelled = true;
     };
   }, [activeTool, files]);
-
-  useEffect(() => {
-    if (activeTool === "textEdit" || (!isPreparingFiles && !isWorking)) return;
-
-    const progressLimit = 99;
-    const timer = window.setInterval(() => {
-      setProgressPercent((current) => current >= progressLimit ? current : Math.min(progressLimit, current + (progressLimit - current) * 0.018));
-    }, 120);
-
-    return () => window.clearInterval(timer);
-  }, [activeTool, isPreparingFiles, isWorking]);
 
   useEffect(() => {
     if (activeTool !== "metadata" || !files[0]) return;
@@ -2037,6 +2107,7 @@ export default function PdfToolsPage() {
   function removeFile(fileIndex: number) {
     if (activeTool === "textEdit") cancelEditorSession();
     setFiles((current) => current.filter((_, index) => index !== fileIndex));
+    if (files.length <= 1) setIsPreparingFiles(false);
     if (activeTool === "textEdit") {
       setEditableTextRuns([]);
       setEditablePdfPages([]);
@@ -2150,16 +2221,18 @@ export default function PdfToolsPage() {
     if (activeTool === "textEdit" && isTextEditorLoading) return setError("Please wait for the PDF text editor to finish loading.");
 
     setIsWorking(true);
-    setProgressPercent(5);
+    updateProcessingProgress(5, "Preparing your selected file...");
     await yieldToBrowser();
     try {
       if (activeTool === "merge") {
         const merged = await PDFDocument.create();
-        for (const file of files) {
+        for (const [index, file] of files.entries()) {
+          updateProcessingProgress(10 + (index / files.length) * 55, `Reading PDF ${index + 1} of ${files.length}...`);
           const source = await openPdf(file);
           const pages = await merged.copyPages(source, source.getPageIndices());
           pages.forEach((page) => merged.addPage(page));
         }
+        updateProcessingProgress(75, "Saving the merged PDF...");
         downloadPdf(await merged.save({ useObjectStreams: true }), "merged-document.pdf");
         completeSuccessfulDownload(`${files.length} PDFs were merged. Your download has started.`);
         return;
@@ -2167,7 +2240,8 @@ export default function PdfToolsPage() {
 
       if (activeTool === "imageToPdf") {
         const pdf = await PDFDocument.create();
-        for (const file of files) {
+        for (const [index, file] of files.entries()) {
+          updateProcessingProgress(10 + (index / files.length) * 55, `Adding image ${index + 1} of ${files.length}...`);
           const imageBytes = new Uint8Array(await file.arrayBuffer());
           const image = file.type === "image/png" ? await pdf.embedPng(imageBytes) : await pdf.embedJpg(imageBytes);
           const page = pdf.addPage([595.28, 841.89]);
@@ -2176,6 +2250,7 @@ export default function PdfToolsPage() {
           const height = image.height * scale;
           page.drawImage(image, { x: (page.getWidth() - width) / 2, y: (page.getHeight() - height) / 2, width, height });
         }
+        updateProcessingProgress(75, "Saving your image PDF...");
         downloadPdf(await pdf.save({ useObjectStreams: true }), "images-to-pdf.pdf");
         completeSuccessfulDownload("An A4 PDF was created from the images. Your download has started.");
         return;
@@ -2184,36 +2259,49 @@ export default function PdfToolsPage() {
       const sourceFile = files[0];
 
       if (activeTool === "wordToPdf") {
-        setStatus("Uploading your DOCX for layout-preserved PDF conversion...");
-        setProgressPercent(20);
-        const convertedPdf = await convertDocxWithWorker(sourceFile);
-        setProgressPercent(90);
+        const convertedPdf = await convertDocxWithWorker(sourceFile, updateProcessingProgress);
         downloadBlob(convertedPdf, outputName(sourceFile.name, "converted"));
         completeSuccessfulDownload("Your Word document was converted to PDF. The download has started.");
         return;
       }
 
       if (activeTool === "excelToPdf") {
-        downloadTextPdf(await excelPages(sourceFile), outputName(sourceFile.name, "converted"), "landscape");
+        updateProcessingProgress(15, "Reading workbook sheets...");
+        const pages = await excelPages(sourceFile);
+        updateProcessingProgress(70, "Creating the PDF from workbook data...");
+        await yieldToBrowser();
+        await downloadTextPdf(pages, outputName(sourceFile.name, "converted"), "landscape", (completed, total) => {
+          updateProcessingProgress(70 + (completed / total) * 20, `Writing workbook content ${completed} of ${total}...`);
+        });
         completeSuccessfulDownload("Your spreadsheet was converted to PDF. The download has started.");
         return;
       }
 
       if (activeTool === "powerpointToPdf") {
-        downloadTextPdf(await powerpointPages(sourceFile), outputName(sourceFile.name, "converted"), "landscape");
+        updateProcessingProgress(15, "Reading presentation slides...");
+        const pages = await powerpointPages(sourceFile);
+        updateProcessingProgress(70, "Creating the PDF from slide content...");
+        await yieldToBrowser();
+        await downloadTextPdf(pages, outputName(sourceFile.name, "converted"), "landscape", (completed, total) => {
+          updateProcessingProgress(70 + (completed / total) * 20, `Writing slide content ${completed} of ${total}...`);
+        });
         completeSuccessfulDownload("Your PowerPoint slides were converted to PDF. The download has started.");
         return;
       }
 
       if (activeTool === "pdfToPowerpoint") {
+        updateProcessingProgress(10, "Preparing PDF pages for conversion...");
         const { default: PptxGenJS } = await import("pptxgenjs");
         const presentation = new PptxGenJS();
         presentation.layout = "LAYOUT_WIDE";
         presentation.author = "DocSprintHub";
         presentation.subject = "PDF to PowerPoint conversion";
         presentation.title = sourceFile.name.replace(/\.pdf$/i, "");
-        const pages = await renderPdfPages(sourceFile, "", "image/png", 1.5);
-        for (const page of pages) {
+        const pages = await renderPdfPages(sourceFile, "", "image/png", 1.5, undefined, (completed, total) => {
+          updateProcessingProgress(10 + (completed / total) * 50, `Rendering PDF page ${completed} of ${total}...`);
+        });
+        for (const [index, page] of pages.entries()) {
+          updateProcessingProgress(60 + ((index + 1) / pages.length) * 25, `Adding page ${index + 1} of ${pages.length} to PowerPoint...`);
           const slide = presentation.addSlide();
           const ratio = page.width / page.height;
           const slideWidth = 13.333;
@@ -2222,6 +2310,7 @@ export default function PdfToolsPage() {
           const height = width / ratio;
           slide.addImage({ data: await blobDataUrl(page.blob), x: (slideWidth - width) / 2, y: (slideHeight - height) / 2, w: width, h: height });
         }
+        updateProcessingProgress(90, "Saving your PowerPoint file...");
         const output = await presentation.write({ outputType: "blob", compression: true });
         if (!(output instanceof Blob)) throw new Error("The PowerPoint file could not be created.");
         downloadBlob(output, outputName(sourceFile.name, "slides", "pptx"));
@@ -2232,25 +2321,34 @@ export default function PdfToolsPage() {
       if (activeTool === "pdfToImage") {
         const zip = new JSZip();
         let imageCount = 0;
+        let renderedFiles = 0;
         for (const file of files) {
-          const pages = await renderPdfPages(file, "", imageFormat === "png" ? "image/png" : "image/jpeg");
+          const pages = await renderPdfPages(file, "", imageFormat === "png" ? "image/png" : "image/jpeg", 1.75, 0.92, (completed, total) => {
+            updateProcessingProgress(10 + ((renderedFiles + completed / total) / files.length) * 60, `Rendering page ${completed} of ${total} from PDF ${renderedFiles + 1} of ${files.length}...`);
+          });
           const filePrefix = file.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_");
           pages.forEach((page, index) => zip.file(`${filePrefix}-page-${index + 1}.${imageFormat}`, page.blob));
           imageCount += pages.length;
+          renderedFiles += 1;
         }
+        updateProcessingProgress(80, "Packaging converted images for download...");
         downloadBlob(await zip.generateAsync({ type: "blob" }), files.length === 1 ? outputName(sourceFile.name, "images", "zip") : `converted-${imageFormat}-images.zip`);
         completeSuccessfulDownload(`${imageCount} images from ${files.length} PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
       if (activeTool === "unlock") {
-        const pages = await renderPdfPages(sourceFile, password, "image/png");
+        const pages = await renderPdfPages(sourceFile, password, "image/png", 1.75, 0.92, (completed, total) => {
+          updateProcessingProgress(10 + (completed / total) * 55, `Rendering page ${completed} of ${total} without its password...`);
+        });
         const unlocked = await PDFDocument.create();
-        for (const pageImage of pages) {
+        for (const [index, pageImage] of pages.entries()) {
+          updateProcessingProgress(65 + ((index + 1) / pages.length) * 20, `Building unlocked page ${index + 1} of ${pages.length}...`);
           const page = unlocked.addPage([pageImage.width, pageImage.height]);
           const image = await unlocked.embedPng(pageImage.bytes);
           page.drawImage(image, { x: 0, y: 0, width: pageImage.width, height: pageImage.height });
         }
+        updateProcessingProgress(90, "Saving the unlocked PDF...");
         downloadPdf(await unlocked.save({ useObjectStreams: true }), outputName(sourceFile.name, "unlocked"));
         completeSuccessfulDownload("A password-free visual copy is downloading. Searchable text is not preserved in this copy.");
         return;
@@ -2281,7 +2379,8 @@ export default function PdfToolsPage() {
           return font;
         };
 
-        for (const run of changedRuns) {
+        for (const [runIndex, run] of changedRuns.entries()) {
+          updateProcessingProgress(10 + (runIndex / changedRuns.length) * 60, `Applying text correction ${runIndex + 1} of ${changedRuns.length}...`);
           const page = textEditedPdf.getPage(run.pageIndex);
           try {
             const fontSegments = await Promise.all(
@@ -2324,24 +2423,29 @@ export default function PdfToolsPage() {
           }
         }
 
+        updateProcessingProgress(75, "Saving your edited PDF...");
         const savedBytes = await textEditedPdf.save({ useObjectStreams: true });
         workingEditorPdfBytes.current = copyBytes(savedBytes);
-        setProgressPercent(80);
+        updateProcessingProgress(90, "Preparing your edited PDF download...");
         downloadPdf(savedBytes, outputName(sourceFile.name, "text-corrected"));
         completeSuccessfulDownload(`${changedRuns.length} text correction${changedRuns.length === 1 ? "" : "s"} was saved and removed from the change history.`);
         return;
       }
 
       if (activeTool === "word" || activeTool === "excel") {
-        const textPages = await extractPdfText(sourceFile);
+        const textPages = await extractPdfText(sourceFile, "", (completed, total) => {
+          updateProcessingProgress(10 + (completed / total) * 60, `Extracting text from page ${completed} of ${total}...`);
+        });
         if (!textPages.some(Boolean)) throw new Error("No selectable text was found in the PDF. Use the OCR tool for scanned documents.");
         if (activeTool === "word") {
+          updateProcessingProgress(75, "Creating the Word document...");
           const { Document, Packer, Paragraph } = await import("docx");
           const children = textPages.flatMap((text, index) => [new Paragraph({ text: `Page ${index + 1}` }), new Paragraph({ text: text || " " })]);
           const wordDocument = new Document({ sections: [{ children }] });
           downloadBlob(await Packer.toBlob(wordDocument), outputName(sourceFile.name, "text", "docx"));
           completeSuccessfulDownload("PDF text was exported to a Word file. Your download has started.");
         } else {
+          updateProcessingProgress(75, "Creating the Excel workbook...");
           const XLSX = await import("xlsx");
           const workbook = XLSX.utils.book_new();
           const sheet = XLSX.utils.aoa_to_sheet([["Page", "Extracted text"], ...textPages.map((text, index) => [index + 1, text])]);
@@ -2355,20 +2459,29 @@ export default function PdfToolsPage() {
 
       if (activeTool === "ocr") {
         const targets = sourceFile.type === "application/pdf" || sourceFile.name.toLowerCase().endsWith(".pdf")
-          ? (await renderPdfPages(sourceFile)).map((page) => page.blob)
+          ? (await renderPdfPages(sourceFile, "", "image/png", 1.75, 0.92, (completed, total) => {
+            updateProcessingProgress(5 + (completed / total) * 25, `Preparing scanned page ${completed} of ${total}...`);
+          })).map((page) => page.blob)
           : [sourceFile];
+        updateProcessingProgress(30, "Starting OCR recognition...");
         const { createWorker } = await import("tesseract.js");
+        let currentOcrPage = 0;
         const worker = await createWorker(ocrLanguage, 1, {
           logger: (message: { status?: string; progress?: number }) => {
-            if (message.status) setStatus(`${message.status}${message.progress === undefined ? "" : ` ${Math.round(message.progress * 100)}%`}`);
+            if (!message.status) return;
+            const pagePortion = targets.length ? (currentOcrPage + (message.progress ?? 0)) / targets.length : 0;
+            updateProcessingProgress(30 + pagePortion * 60, `${message.status}${message.progress === undefined ? "" : ` ${Math.round(message.progress * 100)}%`}`);
           },
         });
         try {
           const output: string[] = [];
           for (const [index, target] of targets.entries()) {
+            currentOcrPage = index;
+            updateProcessingProgress(30 + (index / targets.length) * 60, `Recognizing text on page ${index + 1} of ${targets.length}...`);
             const result = await worker.recognize(target);
             output.push(`--- Page ${index + 1} ---\n${result.data.text.trim()}`);
           }
+          updateProcessingProgress(92, "Preparing OCR text download...");
           downloadBlob(new Blob([output.join("\n\n")], { type: "text/plain;charset=utf-8" }), outputName(sourceFile.name, "ocr", "txt"));
           completeSuccessfulDownload("OCR text is ready. Your download has started.");
         } finally {
@@ -2378,6 +2491,7 @@ export default function PdfToolsPage() {
       }
 
       if (activeTool === "protect") {
+        updateProcessingProgress(15, "Reading your PDF security settings...");
         const { PDFDocument: EncryptingPDFDocument } = await import("pdf-lib-plus-encrypt");
         const protectedPdf = await EncryptingPDFDocument.load(await sourceFile.arrayBuffer());
         await protectedPdf.encrypt({
@@ -2385,6 +2499,7 @@ export default function PdfToolsPage() {
           ownerPassword: ownerPassword || password,
           permissions: { printing: "highResolution", modifying: false, copying: false, annotating: false, fillingForms: true, contentAccessibility: true, documentAssembly: false },
         });
+        updateProcessingProgress(80, "Saving your protected PDF...");
         downloadPdf(await protectedPdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "protected"));
         completeSuccessfulDownload("Your password-protected PDF is ready to download.");
         return;
@@ -2397,19 +2512,24 @@ export default function PdfToolsPage() {
           small: { scale: 1.1, quality: 0.68, label: "Smallest file" },
         } as const;
         const profile = profiles[compressionLevel];
-        const pageImages = await renderPdfPages(sourceFile, "", "image/jpeg", profile.scale, profile.quality);
+        const pageImages = await renderPdfPages(sourceFile, "", "image/jpeg", profile.scale, profile.quality, (completed, total) => {
+          updateProcessingProgress(10 + (completed / total) * 50, `Optimizing page ${completed} of ${total}...`);
+        });
         const compressedPdf = await PDFDocument.create();
-        for (const pageImage of pageImages) {
+        for (const [index, pageImage] of pageImages.entries()) {
+          updateProcessingProgress(60 + ((index + 1) / pageImages.length) * 25, `Assembling optimized page ${index + 1} of ${pageImages.length}...`);
           const page = compressedPdf.addPage([pageImage.width, pageImage.height]);
           const image = await compressedPdf.embedJpg(pageImage.bytes);
           page.drawImage(image, { x: 0, y: 0, width: pageImage.width, height: pageImage.height });
         }
+        updateProcessingProgress(90, "Saving your optimized PDF...");
         const compressedBytes = await compressedPdf.save({ useObjectStreams: true });
         downloadPdf(compressedBytes, outputName(sourceFile.name, "compressed"));
         completeSuccessfulDownload(`Compressed from ${formatBytes(sourceFile.size)} to ${formatBytes(compressedBytes.byteLength)} (${profile.label}). Your download has started.`);
         return;
       }
 
+      updateProcessingProgress(15, "Reading the selected PDF...");
       const sourcePdf = await openPdf(sourceFile);
 
       if (activeTool === "resizeDecrease" || activeTool === "resizeIncrease") {
@@ -2418,7 +2538,13 @@ export default function PdfToolsPage() {
           throw new Error(isDecrease ? "Enter a custom size between 1% and 99%." : "Enter a custom size greater than 100%.");
         }
         const scale = resizePercentage / 100;
-        sourcePdf.getPages().forEach((page) => page.scale(scale, scale));
+        const pages = sourcePdf.getPages();
+        for (const [index, page] of pages.entries()) {
+          page.scale(scale, scale);
+          updateProcessingProgress(20 + ((index + 1) / pages.length) * 60, `Resizing page ${index + 1} of ${pages.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving the resized PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, isDecrease ? "page-size-decreased" : "page-size-increased"));
         completeSuccessfulDownload(`Every page was resized to ${resizePercentage}% while keeping its content proportional. Your download has started.`);
         return;
@@ -2428,17 +2554,21 @@ export default function PdfToolsPage() {
 
       if (activeTool === "split") {
         const zip = new JSZip();
-        for (const pageIndex of pageIndexes) {
+        for (const [index, pageIndex] of pageIndexes.entries()) {
+          updateProcessingProgress(20 + (index / pageIndexes.length) * 60, `Creating PDF ${index + 1} of ${pageIndexes.length}...`);
           const singlePagePdf = await selectedCopy(sourcePdf, [pageIndex]);
           zip.file(`page-${pageIndex + 1}.pdf`, await singlePagePdf.save({ useObjectStreams: true }));
         }
+        updateProcessingProgress(90, "Packaging separate PDF files...");
         downloadBlob(await zip.generateAsync({ type: "blob" }), outputName(sourceFile.name, "split", "zip"));
         completeSuccessfulDownload(`${pageIndexes.length} separate PDFs are being downloaded as a ZIP file.`);
         return;
       }
 
       if (activeTool === "extract" || activeTool === "reorder") {
+        updateProcessingProgress(40, activeTool === "extract" ? "Copying selected PDF pages..." : "Reordering selected PDF pages...");
         const result = await selectedCopy(sourcePdf, pageIndexes);
+        updateProcessingProgress(85, "Saving your PDF...");
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, activeTool === "extract" ? "selected-pages" : "reordered"));
         completeSuccessfulDownload(activeTool === "extract" ? "The PDF with the selected pages is ready." : "The page order was updated. Your download has started.");
         return;
@@ -2448,17 +2578,22 @@ export default function PdfToolsPage() {
         const deleted = new Set(pageIndexes);
         const remaining = sourcePdf.getPageIndices().filter((index) => !deleted.has(index));
         if (!remaining.length) throw new Error("You cannot delete every page. Keep at least one page.");
+        updateProcessingProgress(40, "Removing selected PDF pages...");
         const result = await selectedCopy(sourcePdf, remaining);
+        updateProcessingProgress(85, "Saving your PDF...");
         downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, "pages-removed"));
         completeSuccessfulDownload("The selected pages were removed. Your download has started.");
         return;
       }
 
       if (activeTool === "rotate") {
-        pageIndexes.forEach((index) => {
+        for (const [position, index] of pageIndexes.entries()) {
           const page = sourcePdf.getPage(index);
           page.setRotation(degrees((page.getRotation().angle + rotation) % 360));
-        });
+          updateProcessingProgress(20 + ((position + 1) / pageIndexes.length) * 60, `Rotating page ${position + 1} of ${pageIndexes.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving the rotated PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "rotated"));
         completeSuccessfulDownload("The selected pages were rotated. Your download has started.");
         return;
@@ -2467,12 +2602,15 @@ export default function PdfToolsPage() {
       if (activeTool === "watermark") {
         if (!watermark.trim()) throw new Error("Enter watermark text.");
         const font = await sourcePdf.embedFont(StandardFonts.HelveticaBold);
-        pageIndexes.forEach((index) => {
+        for (const [position, index] of pageIndexes.entries()) {
           const page = sourcePdf.getPage(index);
           const fontSize = Math.max(22, Math.min(page.getWidth(), page.getHeight()) / 10);
           const textWidth = font.widthOfTextAtSize(watermark, fontSize);
           page.drawText(watermark, { x: (page.getWidth() - textWidth) / 2, y: page.getHeight() / 2, size: fontSize, font, color: rgb(0.75, 0.08, 0.08), opacity: 0.28, rotate: degrees(35) });
-        });
+          updateProcessingProgress(20 + ((position + 1) / pageIndexes.length) * 60, `Adding watermark to page ${position + 1} of ${pageIndexes.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving the watermarked PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "watermarked"));
         completeSuccessfulDownload("The watermark was added. Your download has started.");
         return;
@@ -2480,12 +2618,15 @@ export default function PdfToolsPage() {
 
       if (activeTool === "pageNumbers") {
         const font = await sourcePdf.embedFont(StandardFonts.Helvetica);
-        pageIndexes.forEach((index) => {
+        for (const [position, index] of pageIndexes.entries()) {
           const page = sourcePdf.getPage(index);
           const text = `${index + 1} / ${sourcePdf.getPageCount()}`;
           const fontSize = 10;
           page.drawText(text, { x: (page.getWidth() - font.widthOfTextAtSize(text, fontSize)) / 2, y: 16, size: fontSize, font, color: rgb(0.12, 0.12, 0.12) });
-        });
+          updateProcessingProgress(20 + ((position + 1) / pageIndexes.length) * 60, `Adding page number ${position + 1} of ${pageIndexes.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving the numbered PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "numbered"));
         completeSuccessfulDownload("Page numbers were added. Your download has started.");
         return;
@@ -2493,29 +2634,35 @@ export default function PdfToolsPage() {
 
       if (activeTool === "crop") {
         if (cropMargin < 0) throw new Error("The crop margin must be zero or a positive number.");
-        pageIndexes.forEach((index) => {
+        for (const [position, index] of pageIndexes.entries()) {
           const page = sourcePdf.getPage(index);
           const width = page.getWidth() - cropMargin * 2;
           const height = page.getHeight() - cropMargin * 2;
           if (width <= 0 || height <= 0) throw new Error("The crop margin is too large for this page.");
           page.setCropBox(cropMargin, cropMargin, width, height);
-        });
+          updateProcessingProgress(20 + ((position + 1) / pageIndexes.length) * 60, `Cropping page ${position + 1} of ${pageIndexes.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving the cropped PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "cropped"));
         completeSuccessfulDownload("The margins were cropped. Your download has started.");
         return;
       }
 
       if (activeTool === "metadata") {
+        updateProcessingProgress(45, "Updating PDF metadata...");
         sourcePdf.setTitle(metadata.title.trim());
         sourcePdf.setAuthor(metadata.author.trim());
         sourcePdf.setSubject(metadata.subject.trim());
         sourcePdf.setKeywords(metadata.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean));
         sourcePdf.setModificationDate(new Date());
+        updateProcessingProgress(90, "Saving the updated PDF...");
         downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "metadata"));
         completeSuccessfulDownload("The PDF metadata was updated. Your download has started.");
         return;
       }
 
+      updateProcessingProgress(85, "Saving your PDF...");
       downloadPdf(await sourcePdf.save({ useObjectStreams: true }), outputName(sourceFile.name, "optimized"));
       completeSuccessfulDownload("The PDF was optimized. The final size depends on its content.");
     } catch (caughtError) {
@@ -2668,7 +2815,7 @@ export default function PdfToolsPage() {
                 <p className="mt-4 text-center text-xs text-slate-500">{allowsMultiple ? "Drag cards with your mouse to set the merge order. You can also add new files by dragging them into this area." : "You can replace the file by dragging and dropping a new one into this area."}</p>
               </div>
             )}
-            {isPreparingFiles && <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-white/90 p-5 backdrop-blur-[1px]"><div className="w-full max-w-md"><ProgressMeter title="Preparing selected file" message="Reading your file and creating a local preview. Large files can take a moment." progress={progressPercent} /></div></div>}
+            {isPreparingFiles && <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-white/90 p-5 backdrop-blur-[1px]"><div className="w-full max-w-md"><ProgressMeter title="Preparing selected file" message={preparationMessage} progress={progressPercent} /></div></div>}
           </div>}
 
           {needsPages && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : activeTool === "reorder" ? "New page order" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder={activeTool === "reorder" ? "e.g. 3, 1, 2" : "All pages (or e.g. 1, 3-5)"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Leave blank to select all pages.</span></label>}
@@ -2800,7 +2947,7 @@ export default function PdfToolsPage() {
                   <label className="mt-3 block"><span className="text-sm font-bold text-slate-800">Target page size (%)</span><input type="number" min={activeTool === "resizeDecrease" ? 1 : 101} max={activeTool === "resizeDecrease" ? 99 : 400} step="1" value={resizePercentage} onChange={(event) => setResizePercentage(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs leading-5 text-slate-500">{activeTool === "resizeDecrease" ? "Choose any custom size from 1% to 99% of the original page." : "Choose any custom size above 100% of the original page."}</span></label>
                 </section>}
               </div>
-              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Processing your file" message={processingMessage} progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">{processingLocationNote}</p></div>
+              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Processing your file" message={status || processingMessage} progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">{processingLocationNote}</p></div>
             </aside>}
           </div>
         </section>
