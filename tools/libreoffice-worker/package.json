@@ -9,7 +9,7 @@
     "convert": "node dist/src/cli.js",
     "start": "node dist/src/server.js",
     "serve": "node dist/src/server.js",
-    "test": "node dist/tests/conversion-smoke.test.js && node dist/tests/server.test.js && node dist/tests/deployment-verification.test.js",
+    "test": "node dist/tests/conversion-smoke.test.js && node dist/tests/ticket.test.js && node dist/tests/server.test.js && node dist/tests/deployment-verification.test.js",
     "verify:deployment": "node dist/tests/deployment-verification.test.js"
   },
   "devDependencies": {

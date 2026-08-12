@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { convertDocxToPdf } from "./converter";
 import { LibreOfficeConversionError } from "./diagnostics";
 import { activeLibreOfficeProcessCount, readLibreOfficeVersion, resolveLibreOfficeExecutable, stopActiveLibreOfficeProcesses } from "./libreoffice";
+import { ConversionTicketError, type ConversionTicketPayload, verifyConversionTicket } from "./ticket";
 
 const DEFAULT_MAX_DOCX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -18,9 +19,12 @@ export type ConversionServerOptions = {
   maxDocxBytes?: number;
   conversionTimeoutMs?: number;
   maxConcurrentConversions?: number;
+  conversionTicketSecret?: string;
+  allowedOrigins?: string[];
+  converter?: typeof convertDocxToPdf;
 };
 
-export type ResolvedConversionServerOptions = Required<ConversionServerOptions>;
+export type ResolvedConversionServerOptions = Required<Pick<ConversionServerOptions, "host" | "port" | "maxDocxBytes" | "conversionTimeoutMs" | "maxConcurrentConversions">>;
 
 class HttpProblem extends Error {
   constructor(public readonly statusCode: number, message: string) {
@@ -49,6 +53,26 @@ class ConversionLimiter {
   }
 }
 
+class UsedTicketCache {
+  private readonly ticketExpirations = new Map<string, number>();
+
+  consume(ticket: ConversionTicketPayload, nowSeconds: number) {
+    for (const [ticketId, expiresAt] of this.ticketExpirations) {
+      if (expiresAt <= nowSeconds) this.ticketExpirations.delete(ticketId);
+    }
+    if (this.ticketExpirations.has(ticket.ticketId)) return false;
+    // The cache is deliberately bounded. This is defense in depth for one
+    // worker instance; durable, cross-instance replay prevention would need a
+    // shared store and is not introduced by this POC.
+    if (this.ticketExpirations.size >= 10_000) {
+      const oldest = this.ticketExpirations.keys().next().value;
+      if (oldest) this.ticketExpirations.delete(oldest);
+    }
+    this.ticketExpirations.set(ticket.ticketId, ticket.exp);
+    return true;
+  }
+}
+
 function positiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -66,17 +90,48 @@ export function optionsFromEnvironment(environment = process.env): ResolvedConve
 
 function resolveOptions(options: ConversionServerOptions = {}): ResolvedConversionServerOptions {
   const defaults = optionsFromEnvironment();
-  const resolved = { ...defaults, ...Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)) } as ResolvedConversionServerOptions;
+  const resolved: ResolvedConversionServerOptions = {
+    host: options.host ?? defaults.host,
+    port: options.port ?? defaults.port,
+    maxDocxBytes: options.maxDocxBytes ?? defaults.maxDocxBytes,
+    conversionTimeoutMs: options.conversionTimeoutMs ?? defaults.conversionTimeoutMs,
+    maxConcurrentConversions: options.maxConcurrentConversions ?? defaults.maxConcurrentConversions,
+  };
   if (resolved.maxDocxBytes <= 0 || resolved.conversionTimeoutMs <= 0 || resolved.maxConcurrentConversions <= 0) {
     throw new Error("Server limits must be positive integers.");
   }
   return resolved;
 }
 
-function sendJson(response: ServerResponse, statusCode: number, body: Record<string, unknown>) {
+function sendJson(response: ServerResponse, statusCode: number, body: Record<string, unknown>, headers: Record<string, string | number> = {}) {
   const payload = Buffer.from(JSON.stringify(body));
-  response.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8", "Content-Length": payload.length, "Cache-Control": "no-store" });
+  response.writeHead(statusCode, { ...headers, "Content-Type": "application/json; charset=utf-8", "Content-Length": payload.length, "Cache-Control": "no-store, max-age=0" });
   response.end(payload);
+}
+
+function parseAllowedOrigins(origins = process.env.ALLOWED_ORIGINS) {
+  return new Set((origins ?? "").split(",").flatMap((value) => {
+    try {
+      const origin = new URL(value.trim()).origin;
+      return origin === "null" ? [] : [origin];
+    } catch {
+      return [];
+    }
+  }));
+}
+
+function corsHeaders(request: IncomingMessage, allowedOrigins: Set<string>): Record<string, string> | null {
+  const origin = request.headers.origin;
+  if (!origin) return {};
+  if (!allowedOrigins.has(origin)) return null;
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Conversion-Ticket",
+    "Access-Control-Expose-Headers": "Content-Disposition, Content-Length, Content-Type, X-Conversion-Id, X-Conversion-Duration-Ms, X-Input-Bytes, X-Output-Bytes",
+    "Access-Control-Max-Age": "600",
+    Vary: "Origin",
+  };
 }
 
 function headerValue(value: string) {
@@ -164,6 +219,10 @@ export type LocalConversionService = {
 export function createConversionServer(options: ConversionServerOptions = {}): LocalConversionService {
   const resolved = resolveOptions(options);
   const limiter = new ConversionLimiter(resolved.maxConcurrentConversions);
+  const usedTickets = new UsedTicketCache();
+  const allowedOrigins = new Set(options.allowedOrigins ?? parseAllowedOrigins());
+  const ticketSecret = options.conversionTicketSecret ?? process.env.CONVERSION_TICKET_SECRET;
+  const converter = options.converter ?? convertDocxToPdf;
   let closing = false;
 
   const server = createServer((request, response) => {
@@ -187,17 +246,50 @@ export function createConversionServer(options: ConversionServerOptions = {}): L
       }
       return;
     }
-    if (method !== "POST" || pathname !== "/convert/docx-to-pdf") {
+    if (pathname !== "/convert/docx-to-pdf") {
       sendJson(response, 404, { error: "not_found" });
       return;
     }
-    if (closing) {
-      sendJson(response, 503, { error: "service_shutting_down" });
+    const cors = corsHeaders(request, allowedOrigins);
+    if (cors === null) {
+      sendJson(response, 403, { error: "origin_not_allowed", message: "This conversion request is not allowed." });
       return;
     }
+    if (method === "OPTIONS") {
+      response.writeHead(204, { ...cors, "Cache-Control": "no-store, max-age=0" });
+      response.end();
+      return;
+    }
+    if (method !== "POST") {
+      sendJson(response, 404, { error: "not_found" }, cors);
+      return;
+    }
+    if (closing) {
+      sendJson(response, 503, { error: "service_shutting_down" }, cors);
+      return;
+    }
+    if (!ticketSecret || ticketSecret.length < 32) {
+      sendJson(response, 503, { error: "service_unavailable", message: "The document conversion service is temporarily unavailable." }, cors);
+      console.error(JSON.stringify({ event: "conversion_ticket_configuration_missing" }));
+      return;
+    }
+
+    let ticket: ConversionTicketPayload;
+    try {
+      ticket = verifyConversionTicket(request.headers["x-conversion-ticket"], ticketSecret);
+      if (ticket.maxBytes > resolved.maxDocxBytes || !usedTickets.consume(ticket, Math.floor(Date.now() / 1000))) {
+        throw new ConversionTicketError();
+      }
+    } catch (error) {
+      const statusCode = error instanceof ConversionTicketError ? 401 : 500;
+      const message = statusCode === 401 ? "A valid conversion ticket is required." : "The document conversion service is temporarily unavailable.";
+      sendJson(response, statusCode, { error: statusCode === 401 ? "unauthorized" : "service_unavailable", message }, cors);
+      return;
+    }
+
     if (!limiter.tryAcquire()) {
       response.setHeader("Retry-After", "1");
-      sendJson(response, 429, { error: "conversion_capacity_reached", message: "The local conversion limit is currently reached. Retry shortly." });
+      sendJson(response, 429, { error: "conversion_capacity_reached", message: "The conversion service is currently busy. Retry shortly." }, cors);
       return;
     }
 
@@ -209,6 +301,9 @@ export function createConversionServer(options: ConversionServerOptions = {}): L
       if (upload.data.length > resolved.maxDocxBytes) {
         throw new HttpProblem(413, `DOCX exceeds the ${resolved.maxDocxBytes}-byte upload limit.`);
       }
+      if (upload.data.length > ticket.maxBytes || upload.data.length !== ticket.declaredBytes || upload.filename !== ticket.filename) {
+        throw new HttpProblem(401, "The conversion ticket does not match this DOCX upload.");
+      }
       jobDirectory = await mkdtemp(path.join(os.tmpdir(), "docsprinthub-lo-http-"));
       const inputDirectory = path.join(jobDirectory, "input");
       const outputDirectory = path.join(jobDirectory, "output");
@@ -216,7 +311,7 @@ export function createConversionServer(options: ConversionServerOptions = {}): L
       await mkdir(outputDirectory, { recursive: true });
       const inputPath = path.join(inputDirectory, "upload.docx");
       await writeFile(inputPath, upload.data);
-      const conversion = await convertDocxToPdf({ inputPath, outputDirectory, timeoutMs: resolved.conversionTimeoutMs });
+      const conversion = await converter({ inputPath, outputDirectory, timeoutMs: resolved.conversionTimeoutMs });
       const pdf = await readFile(conversion.outputPath);
       const outputFilename = `${path.basename(upload.filename, path.extname(upload.filename))}.pdf`;
       // The response is fully buffered at this point, so remove every on-disk
@@ -226,10 +321,11 @@ export function createConversionServer(options: ConversionServerOptions = {}): L
       await rm(jobDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });
       jobDirectory = undefined;
       response.writeHead(200, {
+        ...cors,
         "Content-Type": "application/pdf",
         "Content-Disposition": `attachment; filename="${headerValue(outputFilename)}"`,
         "Content-Length": pdf.length,
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, max-age=0",
         "X-Conversion-Id": jobId,
         "X-Conversion-Duration-Ms": String(conversion.durationMs),
         "X-Input-Bytes": String(upload.data.length),
@@ -240,8 +336,12 @@ export function createConversionServer(options: ConversionServerOptions = {}): L
       console.info(JSON.stringify({ event: "docx_to_pdf_completed", jobId, inputFilename: upload.filename, inputBytes: upload.data.length, outputBytes: pdf.length, durationMs: conversion.durationMs, libreOfficeVersion: conversion.libreOfficeVersion, success: true }));
     } catch (error) {
       const statusCode = error instanceof HttpProblem ? error.statusCode : error instanceof LibreOfficeConversionError ? 422 : 500;
-      const message = error instanceof HttpProblem ? error.message : error instanceof LibreOfficeConversionError ? error.message : "Conversion failed unexpectedly.";
-      if (!response.headersSent) sendJson(response, statusCode, { error: statusCode === 422 ? "conversion_failed" : "request_failed", message, jobId });
+      const message = error instanceof HttpProblem
+        ? error.message
+        : error instanceof LibreOfficeConversionError
+          ? "The DOCX could not be converted. Confirm it opens correctly in Word and try again."
+          : "The document conversion failed unexpectedly. Please try again.";
+      if (!response.headersSent) sendJson(response, statusCode, { error: statusCode === 422 ? "conversion_failed" : "request_failed", message, jobId }, cors);
       console.warn(JSON.stringify({ event: "docx_to_pdf_failed", jobId, statusCode, durationMs: Math.round(performance.now() - startedAt), message, success: false }));
     } finally {
       if (jobDirectory) await rm(jobDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 250 });

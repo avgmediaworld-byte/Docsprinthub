@@ -131,7 +131,7 @@ const toolOptions: ToolOption[] = [
   { id: "rotate", title: "Rotate pages", description: "Turn selected pages clockwise." },
   { id: "pdfToImage", title: "PDF to JPG / PNG", description: "Convert PDF pages into image files." },
   { id: "imageToPdf", title: "JPG / PNG to PDF", description: "Create a PDF from photos or images." },
-  { id: "wordToPdf", title: "Word to PDF", description: "Convert a DOCX document to a readable PDF." },
+  { id: "wordToPdf", title: "Word to PDF", description: "Convert a DOCX document to a layout-preserved PDF." },
   { id: "powerpointToPdf", title: "PowerPoint to PDF", description: "Convert PPTX slide text to a PDF." },
   { id: "excelToPdf", title: "Excel to PDF", description: "Convert XLSX or XLS workbook data to a PDF." },
   { id: "pdfToPowerpoint", title: "PDF to PowerPoint", description: "Convert every PDF page into a PowerPoint slide." },
@@ -171,6 +171,8 @@ const pageTools = new Set<Tool>([
   "pageNumbers",
   "crop",
 ]);
+
+const MAX_DOCX_CONVERSION_BYTES = 25 * 1024 * 1024;
 
 function formatBytes(size: number) {
   return size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`;
@@ -402,6 +404,76 @@ function sampleRunAppearanceFromPreview(
   sampleCanvas.width = 0;
   sampleCanvas.height = 0;
   return { textColor: colorDistance(textColor, backgroundColor) < 24 ? defaultTextColor : textColor, backgroundColor };
+}
+
+async function convertDocxWithWorker(file: File) {
+  if (file.size > MAX_DOCX_CONVERSION_BYTES) {
+    throw new Error("The DOCX file is larger than the 25 MiB conversion limit.");
+  }
+
+  const mimeType = file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  let sessionResponse: Response;
+  try {
+    sessionResponse = await fetch("/api/conversion-sessions/docx-to-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, mimeType, size: file.size }),
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error("The document conversion service cannot be reached. Please try again shortly.");
+  }
+
+  const sessionBody: unknown = await sessionResponse.json().catch(() => null);
+  if (!sessionResponse.ok || !sessionBody || typeof sessionBody !== "object") {
+    const message = sessionBody && typeof sessionBody === "object" && "message" in sessionBody && typeof sessionBody.message === "string"
+      ? sessionBody.message
+      : "The DOCX could not be prepared for conversion. Please try again.";
+    throw new Error(message);
+  }
+
+  const { ticket, workerUrl } = sessionBody as Record<string, unknown>;
+  if (typeof ticket !== "string" || typeof workerUrl !== "string") {
+    throw new Error("The document conversion service returned an invalid session. Please try again.");
+  }
+
+  let workerEndpoint: URL;
+  try {
+    workerEndpoint = new URL("/convert/docx-to-pdf", workerUrl);
+    const localDevelopmentUrl = workerEndpoint.protocol === "http:" && window.location.hostname === "localhost";
+    if (workerEndpoint.protocol !== "https:" && !localDevelopmentUrl) throw new Error("insecure worker URL");
+  } catch {
+    throw new Error("The document conversion service is temporarily unavailable. Please try again shortly.");
+  }
+
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  let response: Response;
+  try {
+    response = await fetch(workerEndpoint, {
+      method: "POST",
+      headers: { "X-Conversion-Ticket": ticket },
+      body: formData,
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error("The document conversion service cannot be reached. Please try again shortly.");
+  }
+
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const message = body && typeof body === "object" && "message" in body && typeof body.message === "string"
+      ? body.message
+      : "The DOCX could not be converted. Please try again.";
+    throw new Error(message);
+  }
+  if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/pdf")) {
+    throw new Error("The conversion service returned an invalid PDF. Please try again.");
+  }
+
+  const pdf = await response.blob();
+  if (pdf.size === 0) throw new Error("The conversion service returned an empty PDF. Please try again.");
+  return pdf;
 }
 
 function createEditorPdfSession(id: number): EditorPdfSession {
@@ -1067,15 +1139,6 @@ async function officeArchive(file: File) {
   }
 }
 
-async function docxPages(file: File): Promise<TextPdfPage[]> {
-  const archive = await officeArchive(file);
-  const documentXml = archive.file("word/document.xml");
-  if (!documentXml) throw new Error("Use a .docx Word document.");
-  const paragraphs = xmlParagraphs(await documentXml.async("text"));
-  if (!paragraphs.length) throw new Error("No readable text was found in this Word document.");
-  return [{ title: file.name.replace(/\.docx$/i, ""), paragraphs }];
-}
-
 async function powerpointPages(file: File): Promise<TextPdfPage[]> {
   const archive = await officeArchive(file);
   const slideFiles = Object.keys(archive.files)
@@ -1224,6 +1287,12 @@ export default function PdfToolsPage() {
   const activeDetails = toolOptions.find((tool) => tool.id === activeTool) ?? toolOptions[0];
   const usesConvertLayout = ["pdfToImage", "imageToPdf", "word", "excel", "ocr", "wordToPdf", "excelToPdf", "powerpointToPdf", "pdfToPowerpoint"].includes(activeTool);
   const usesResizeLayout = activeTool === "resizeDecrease" || activeTool === "resizeIncrease";
+  const processingMessage = activeTool === "wordToPdf"
+    ? "Your DOCX is being converted securely by the document conversion service. Download will start automatically."
+    : "Your result is being created securely in your browser. Download will start automatically.";
+  const processingLocationNote = activeTool === "wordToPdf"
+    ? "DOCX files are sent securely to the conversion service and deleted after processing."
+    : "Files are processed locally in your browser.";
   const usesLargeUploadPanel = activeTool === "merge" || activeTool === "split" || activeTool === "optimize" || usesConvertLayout || usesResizeLayout;
   const usesTallActionSidebar = activeTool === "split" || activeTool === "optimize";
   const usesCenteredActionSidebar = usesTallActionSidebar || usesConvertLayout || usesResizeLayout;
@@ -1987,7 +2056,7 @@ export default function PdfToolsPage() {
   function addFiles(added: File[]) {
     const isValid = (file: File) => {
       if (isImageInput) return ["image/jpeg", "image/png"].includes(file.type);
-      if (activeTool === "wordToPdf") return /\.docx$/i.test(file.name);
+      if (activeTool === "wordToPdf") return /\.docx$/i.test(file.name) && file.size <= MAX_DOCX_CONVERSION_BYTES;
       if (activeTool === "excelToPdf") return /\.(xlsx|xls)$/i.test(file.name);
       if (activeTool === "powerpointToPdf") return /\.pptx$/i.test(file.name);
       if (acceptsPdfOrImage) return file.type === "application/pdf" || ["image/jpeg", "image/png"].includes(file.type) || /\.(pdf|png|jpe?g)$/i.test(file.name);
@@ -1995,7 +2064,7 @@ export default function PdfToolsPage() {
     };
     const invalid = added.find((file) => !isValid(file));
     if (invalid) {
-      setError(isImageInput ? "Please select JPG or PNG images only." : activeTool === "wordToPdf" ? "Please select a DOCX file." : activeTool === "excelToPdf" ? "Please select an XLSX or XLS file." : activeTool === "powerpointToPdf" ? "Please select a PPTX file." : "Please select a valid PDF file.");
+      setError(isImageInput ? "Please select JPG or PNG images only." : activeTool === "wordToPdf" ? "Please select a DOCX file no larger than 25 MiB." : activeTool === "excelToPdf" ? "Please select an XLSX or XLS file." : activeTool === "powerpointToPdf" ? "Please select a PPTX file." : "Please select a valid PDF file.");
     } else if (added.length) {
       if (activeTool === "textEdit") cancelEditorSession();
       setIsPreparingFiles(true);
@@ -2115,7 +2184,11 @@ export default function PdfToolsPage() {
       const sourceFile = files[0];
 
       if (activeTool === "wordToPdf") {
-        downloadTextPdf(await docxPages(sourceFile), outputName(sourceFile.name, "converted"));
+        setStatus("Uploading your DOCX for layout-preserved PDF conversion...");
+        setProgressPercent(20);
+        const convertedPdf = await convertDocxWithWorker(sourceFile);
+        setProgressPercent(90);
+        downloadBlob(convertedPdf, outputName(sourceFile.name, "converted"));
         completeSuccessfulDownload("Your Word document was converted to PDF. The download has started.");
         return;
       }
@@ -2727,7 +2800,7 @@ export default function PdfToolsPage() {
                   <label className="mt-3 block"><span className="text-sm font-bold text-slate-800">Target page size (%)</span><input type="number" min={activeTool === "resizeDecrease" ? 1 : 101} max={activeTool === "resizeDecrease" ? 99 : 400} step="1" value={resizePercentage} onChange={(event) => setResizePercentage(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs leading-5 text-slate-500">{activeTool === "resizeDecrease" ? "Choose any custom size from 1% to 99% of the original page." : "Choose any custom size above 100% of the original page."}</span></label>
                 </section>}
               </div>
-              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Processing your file" message="Your result is being created securely in your browser. Download will start automatically." progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">Files are processed locally in your browser.</p></div>
+              <div className="mt-auto">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Processing your file" message={processingMessage} progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Processing..." : `${activeDetails.title} and download`}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">{processingLocationNote}</p></div>
             </aside>}
           </div>
         </section>

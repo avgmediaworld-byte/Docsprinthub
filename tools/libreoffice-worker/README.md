@@ -1,6 +1,6 @@
 # LibreOffice conversion worker POC
 
-This is an isolated, standalone Node.js HTTP service proof of concept for DOCX-to-PDF conversion. It is not imported by the Next.js application and is not exposed through DocSprintHub or Vercel. LibreOffice performs document rendering; this worker validates requests, starts isolated LibreOffice processes, returns the resulting PDF, and removes temporary data.
+This is an isolated, standalone Node.js HTTP service proof of concept for DOCX-to-PDF conversion. LibreOffice performs document rendering; this worker validates signed conversion requests, starts isolated LibreOffice processes, returns the resulting PDF, and removes temporary data.
 
 The service intentionally has no database, queue, authentication, cloud storage, or production integration.
 
@@ -49,6 +49,8 @@ All limits are positive integers. Invalid or missing values use their safe defau
 | `MAX_UPLOAD_BYTES` | `26214400` | Maximum DOCX file bytes (25 MiB). |
 | `CONVERSION_TIMEOUT_MS` | `120000` | Per-conversion LibreOffice timeout. |
 | `MAX_CONCURRENT_CONVERSIONS` | `2` | Maximum concurrent LibreOffice conversion processes. |
+| `CONVERSION_TICKET_SECRET` | _required for conversion_ | Shared, random 32+ character secret used to verify short-lived HMAC conversion tickets. Set the same value in the DocSprintHub ticket issuer; never send it to a browser. |
+| `ALLOWED_ORIGINS` | _none_ | Comma-separated exact DocSprintHub browser origins permitted by CORS, for example `https://docsprinthub.vercel.app`. Wildcards are not supported. |
 
 The older `LO_WORKER_*` names remain accepted for local POC compatibility, but new deployments should use the variables above.
 
@@ -85,6 +87,8 @@ docker run --rm --name docsprinthub-libreoffice-worker \
   --env MAX_UPLOAD_BYTES=26214400 \
   --env CONVERSION_TIMEOUT_MS=120000 \
   --env MAX_CONCURRENT_CONVERSIONS=2 \
+  --env CONVERSION_TICKET_SECRET="set-a-strong-shared-secret" \
+  --env ALLOWED_ORIGINS=https://docsprinthub.vercel.app \
   docsprinthub-libreoffice-worker:local
 ```
 
@@ -128,22 +132,27 @@ Example response:
 
 ### `POST /convert/docx-to-pdf`
 
-Send a single `.docx` part named `file`. A successful response is the generated `application/pdf` attachment.
+Send a single `.docx` part named `file` plus an `X-Conversion-Ticket` header. The ticket is a five-minute, HMAC-SHA256 capability minted by DocSprintHub's server-side conversion-session endpoint. It is bound to `docx-to-pdf`, the declared filename, and the exact declared input byte count. It is not an API key and must not be created in a browser.
+
+The worker rejects a missing, invalid, expired, mismatched, or previously used ticket with `401`. Replay detection is bounded in memory per worker instance; it provides defense in depth but is not durable across restarts or multiple instances. Durable cross-instance replay prevention would require a shared store and is deliberately outside this POC.
+
+For browser uploads, configure `ALLOWED_ORIGINS` and send the request from one of those origins. The server handles `OPTIONS` and returns explicit CORS headers for only configured origins. CORS is not authentication; ticket verification remains mandatory.
 
 ```bash
 curl --fail-with-body \
   -X POST http://127.0.0.1:3030/convert/docx-to-pdf \
+  -H "X-Conversion-Ticket: <server-issued-ticket>" \
   -F 'file=@/srv/fixtures/sample.docx;type=application/vnd.openxmlformats-officedocument.wordprocessingml.document' \
   --output converted.pdf
 ```
 
-Useful success headers include conversion duration and input/output byte counts. `413` indicates an oversized upload, `429` means all conversion slots are occupied, `422` indicates a LibreOffice conversion failure, and `503` is returned while the service is shutting down. The worker creates a unique output directory for every job and the converter refuses to overwrite an existing output filename.
+Useful success headers include conversion duration and input/output byte counts. `413` indicates an oversized upload, `429` means all conversion slots are occupied, `422` indicates a conversion failure, and `503` is returned while the service is shutting down. PDFs are returned with `Cache-Control: no-store, max-age=0`. The worker creates a unique output directory for every job and the converter refuses to overwrite an existing output filename.
 
 ## Temporary data and safety boundaries
 
 For every request, the worker creates unique OS-temporary input and output directories. The converter separately creates a unique LibreOffice user profile. The original DOCX is never changed. The generated PDF, upload, profile, and directories are removed after either a successful response or a failure. No job document is stored permanently by this POC.
 
-The upload limit, timeout, and concurrency cap prevent unbounded memory and LibreOffice-process use, but this is not a complete internet-facing security perimeter. Before deploying publicly, place it behind TLS and an authenticated/restricted gateway, apply request-rate and network controls, run under a dedicated unprivileged account, monitor resource use, and keep LibreOffice/security updates current. This POC does not execute macros, but untrusted office files still require operational isolation appropriate to the deployment environment.
+The upload limit, timeout, ticket verification, replay cache, CORS policy, and concurrency cap prevent several common failure and abuse modes, but this is not a complete internet-facing security perimeter. Before deploying publicly, use TLS, apply request-rate and network controls at the ticket issuer and worker edge, run under a dedicated unprivileged account, monitor resource use, and keep LibreOffice/security updates current. This POC does not execute macros, but untrusted office files still require operational isolation appropriate to the deployment environment.
 
 ## CLI remains available
 
