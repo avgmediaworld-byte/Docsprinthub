@@ -6,7 +6,7 @@ import { ChangeEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, us
 import type { ClipboardEvent as ReactClipboardEvent } from "react";
 import JSZip from "jszip";
 import jsPDF from "jspdf";
-import { Check, ClipboardPaste, Copy, Redo2, Scissors, Trash2, Undo2 } from "lucide-react";
+import { Check, ClipboardPaste, Copy, Redo2, Scissors, Trash2, Undo2, X } from "lucide-react";
 import { degrees, PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask } from "pdfjs-dist";
 import { trackDownload, trackToolSelection } from "@/app/lib/analytics/client";
@@ -83,6 +83,14 @@ type EditablePdfPage = {
   height: number;
 };
 type RenderedPdfPage = { blob: Blob; bytes: Uint8Array; width: number; height: number };
+type OrganizePdfPage = {
+  id: string;
+  file: File;
+  sourceFileNumber: number;
+  sourcePageIndex: number;
+  thumbnail: string;
+};
+type OrganizeDropTarget = { pageId: string; placement: "before" | "after" };
 type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
 type EditorPageSurface = ImageBitmap | HTMLCanvasElement;
 type CanvasTextPaintStatus = "painted" | "missing" | "unverified";
@@ -127,7 +135,7 @@ const toolOptions: ToolOption[] = [
   { id: "split", title: "Split PDF", description: "Download selected pages as separate PDFs." },
   { id: "extract", title: "Extract pages", description: "Make a new PDF from chosen pages." },
   { id: "delete", title: "Delete pages", description: "Remove unwanted pages from a PDF." },
-  { id: "reorder", title: "Reorder pages", description: "Set the exact page sequence you need." },
+  { id: "reorder", title: "Organize Pages", description: "Arrange, add or remove PDF pages in the order you need." },
   { id: "rotate", title: "Rotate pages", description: "Turn selected pages clockwise." },
   { id: "pdfToImage", title: "PDF to JPG / PNG", description: "Convert PDF pages into image files." },
   { id: "imageToPdf", title: "JPG / PNG to PDF", description: "Create a PDF from photos or images." },
@@ -1080,6 +1088,51 @@ function renderedCanvasTextPaintStatus(
   }
 }
 
+async function renderOrganizePdfPages(
+  file: File,
+  sourceFileNumber: number,
+  onPageReady: (page: OrganizePdfPage, completedPages: number, totalPages: number) => void,
+) {
+  const pdfjs = await loadPdfJs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  const pdf = await loadingTask.promise;
+  const pages: OrganizePdfPage[] = [];
+
+  try {
+    for (let sourcePageIndex = 0; sourcePageIndex < pdf.numPages; sourcePageIndex += 1) {
+      const page = await pdf.getPage(sourcePageIndex + 1);
+      const viewport = page.getViewport({ scale: 0.26 });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      try {
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("The browser canvas could not be started.");
+        await page.render({ canvas, canvasContext: context, viewport, background: "white" }).promise;
+        const organizePage: OrganizePdfPage = {
+          id: `${sourceFileNumber}-${sourcePageIndex}`,
+          file,
+          sourceFileNumber,
+          sourcePageIndex,
+          thumbnail: canvas.toDataURL("image/jpeg", 0.82),
+        };
+        pages.push(organizePage);
+        onPageReady(organizePage, sourcePageIndex + 1, pdf.numPages);
+      } finally {
+        canvas.width = 0;
+        canvas.height = 0;
+        page.cleanup();
+      }
+      await yieldToBrowser();
+    }
+  } finally {
+    await pdf.cleanup();
+    loadingTask.destroy();
+  }
+
+  return pages;
+}
+
 async function renderEditorPageSurface(
   page: PDFPageProxy,
   session: EditorPdfSession,
@@ -1303,6 +1356,8 @@ export default function PdfToolsPage() {
   const [openMenu, setOpenMenu] = useState<ToolMenu | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+  const [organizePages, setOrganizePages] = useState<OrganizePdfPage[]>([]);
+  const [selectedOrganizePageIds, setSelectedOrganizePageIds] = useState<Set<string>>(() => new Set());
   const [pageSelection, setPageSelection] = useState("");
   const [rotation, setRotation] = useState(90);
   const [imageFormat, setImageFormat] = useState<"png" | "jpg">("png");
@@ -1334,7 +1389,16 @@ export default function PdfToolsPage() {
   const [progressPercent, setProgressPercent] = useState<number | null>(0);
   const [isDragging, setIsDragging] = useState(false);
   const [draggedFileIndex, setDraggedFileIndex] = useState<number | null>(null);
+  const [draggedOrganizePageId, setDraggedOrganizePageId] = useState<string | null>(null);
+  const [organizeDropTarget, setOrganizeDropTarget] = useState<OrganizeDropTarget | null>(null);
   const externalDragDepth = useRef(0);
+  const organizeSourceNumbersRef = useRef<Map<File, number>>(new Map());
+  const organizeInsertionAnchorsRef = useRef<Map<File, string | null>>(new Map());
+  const nextOrganizeSourceNumberRef = useRef(1);
+  const organizeGenerationRef = useRef(0);
+  const organizePageListRef = useRef<HTMLDivElement | null>(null);
+  const organizeAutoScrollFrameRef = useRef<number | null>(null);
+  const organizeAutoScrollVelocityRef = useRef(0);
   const toolMenuRef = useRef<HTMLElement | null>(null);
   const workingEditorPdfBytes = useRef<Uint8Array | null>(null);
   const editorPdfSessionRef = useRef<EditorPdfSession | null>(null);
@@ -1383,7 +1447,7 @@ export default function PdfToolsPage() {
         ? "19rem"
         : undefined;
   const isImageInput = activeTool === "imageToPdf";
-  const allowsMultiple = activeTool === "merge" || isImageInput || activeTool === "pdfToImage";
+  const allowsMultiple = activeTool === "merge" || activeTool === "reorder" || isImageInput || activeTool === "pdfToImage";
   const needsPages = pageTools.has(activeTool);
   const acceptsPdfOrImage = activeTool === "ocr";
   const selectedTextRun = useMemo(() => editableTextRuns.find((run) => run.id === selectedTextRunId) ?? null, [editableTextRuns, selectedTextRunId]);
@@ -1399,6 +1463,50 @@ export default function PdfToolsPage() {
     setProgressPercent(progress === null ? null : Math.max(0, Math.min(100, progress)));
     setStatus(message);
   }
+
+  function stopOrganizeAutoScroll() {
+    organizeAutoScrollVelocityRef.current = 0;
+    if (organizeAutoScrollFrameRef.current !== null) {
+      cancelAnimationFrame(organizeAutoScrollFrameRef.current);
+      organizeAutoScrollFrameRef.current = null;
+    }
+  }
+
+  function updateOrganizeAutoScroll(pointerY: number) {
+    const pageList = organizePageListRef.current;
+    if (!pageList) return;
+
+    const bounds = pageList.getBoundingClientRect();
+    const edgeSize = 72;
+    const distanceFromTop = pointerY - bounds.top;
+    const distanceFromBottom = bounds.bottom - pointerY;
+    const speedForDistance = (distance: number) => Math.max(5, Math.ceil(((edgeSize - distance) / edgeSize) * 22));
+    const velocity = distanceFromTop < edgeSize
+      ? -speedForDistance(Math.max(0, distanceFromTop))
+      : distanceFromBottom < edgeSize
+        ? speedForDistance(Math.max(0, distanceFromBottom))
+        : 0;
+
+    organizeAutoScrollVelocityRef.current = velocity;
+    if (!velocity) {
+      stopOrganizeAutoScroll();
+      return;
+    }
+    if (organizeAutoScrollFrameRef.current !== null) return;
+
+    const scroll = () => {
+      const list = organizePageListRef.current;
+      if (!list || !organizeAutoScrollVelocityRef.current) {
+        organizeAutoScrollFrameRef.current = null;
+        return;
+      }
+      list.scrollTop += organizeAutoScrollVelocityRef.current;
+      organizeAutoScrollFrameRef.current = requestAnimationFrame(scroll);
+    };
+    organizeAutoScrollFrameRef.current = requestAnimationFrame(scroll);
+  }
+
+  useEffect(() => () => stopOrganizeAutoScroll(), []);
 
   useLayoutEffect(() => {
     if (!selectedTextRun) return;
@@ -1431,7 +1539,7 @@ export default function PdfToolsPage() {
   }, [selectedTextRun?.id, selectedTextRun?.pageIndex]);
 
   useEffect(() => {
-    if (activeTool === "textEdit") return;
+    if (activeTool === "textEdit" || activeTool === "reorder") return;
     let cancelled = false;
 
     if (!files.length) return;
@@ -1462,6 +1570,75 @@ export default function PdfToolsPage() {
     return () => {
       cancelled = true;
     };
+  }, [activeTool, files]);
+
+  useEffect(() => {
+    if (activeTool !== "reorder" || !files.length) return;
+
+    const sources = files.flatMap((file) => {
+      if (organizeSourceNumbersRef.current.has(file)) return [];
+      const sourceFileNumber = nextOrganizeSourceNumberRef.current;
+      nextOrganizeSourceNumberRef.current += 1;
+      organizeSourceNumbersRef.current.set(file, sourceFileNumber);
+      return [{
+        file,
+        sourceFileNumber,
+        insertionAfterPageId: organizeInsertionAnchorsRef.current.get(file) ?? null,
+      }];
+    });
+    if (!sources.length) return;
+
+    const generation = organizeGenerationRef.current;
+    const isCurrentOrganizer = () => organizeGenerationRef.current === generation && activeTool === "reorder";
+    setIsPreparingFiles(true);
+    setProgressPercent(null);
+    setStatus("Reading PDF pages and rendering their thumbnails...");
+
+    void (async () => {
+      try {
+        let mostRecentlyInsertedPageId: string | null = null;
+        for (const [sourceIndex, source] of sources.entries()) {
+          let insertionAfterPageId = mostRecentlyInsertedPageId ?? source.insertionAfterPageId;
+          await renderOrganizePdfPages(source.file, source.sourceFileNumber, (page, completed, total) => {
+            if (isCurrentOrganizer()) {
+              const insertionAnchorPageId = insertionAfterPageId;
+              setOrganizePages((current) => {
+                const insertionIndex = insertionAnchorPageId
+                  ? current.findIndex((candidate) => candidate.id === insertionAnchorPageId)
+                  : -1;
+                if (insertionIndex < 0) return [...current, page];
+                return [...current.slice(0, insertionIndex + 1), page, ...current.slice(insertionIndex + 1)];
+              });
+              insertionAfterPageId = page.id;
+              mostRecentlyInsertedPageId = page.id;
+              if (completed === total && sourceIndex === sources.length - 1) {
+                setProgressPercent(100);
+                setIsPreparingFiles(false);
+                setStatus("All page thumbnails are ready. Arrange the sequence, then download your PDF.");
+              } else {
+                setProgressPercent(null);
+                setStatus(`Rendering File ${source.sourceFileNumber}, page ${completed} of ${total}...`);
+              }
+            }
+          });
+          organizeInsertionAnchorsRef.current.delete(source.file);
+          if (!isCurrentOrganizer()) return;
+          setStatus(`File ${source.sourceFileNumber} is ready. ${sources.length - sourceIndex - 1 ? "Preparing the next PDF..." : "Arrange the pages, then download your PDF."}`);
+          await yieldToBrowser();
+        }
+      } catch (caughtError) {
+        if (isCurrentOrganizer()) {
+          const message = caughtError instanceof Error ? caughtError.message : "The PDF pages could not be prepared.";
+          setError(message);
+        }
+      } finally {
+        if (isCurrentOrganizer()) {
+          setProgressPercent(100);
+          setIsPreparingFiles(false);
+        }
+      }
+    })();
+
   }, [activeTool, files]);
 
   useEffect(() => {
@@ -1870,6 +2047,15 @@ export default function PdfToolsPage() {
     setOpenMenu(null);
     setFiles([]);
     setThumbnails({});
+    setOrganizePages([]);
+    setSelectedOrganizePageIds(new Set());
+    setDraggedOrganizePageId(null);
+    setOrganizeDropTarget(null);
+    stopOrganizeAutoScroll();
+    organizeSourceNumbersRef.current = new Map();
+    organizeInsertionAnchorsRef.current = new Map();
+    nextOrganizeSourceNumberRef.current = 1;
+    organizeGenerationRef.current += 1;
     setDraggedFileIndex(null);
     setEditableTextRuns([]);
     setEditablePdfPages([]);
@@ -2084,6 +2270,15 @@ export default function PdfToolsPage() {
     cancelEditorSession();
     setFiles([]);
     setThumbnails({});
+    setOrganizePages([]);
+    setSelectedOrganizePageIds(new Set());
+    setDraggedOrganizePageId(null);
+    setOrganizeDropTarget(null);
+    stopOrganizeAutoScroll();
+    organizeSourceNumbersRef.current = new Map();
+    organizeInsertionAnchorsRef.current = new Map();
+    nextOrganizeSourceNumberRef.current = 1;
+    organizeGenerationRef.current += 1;
     setEditableTextRuns([]);
     setEditablePdfPages([]);
     setEditorPageCount(0);
@@ -2138,6 +2333,13 @@ export default function PdfToolsPage() {
       setError(isImageInput ? "Please select JPG or PNG images only." : activeTool === "wordToPdf" ? "Please select a DOCX file no larger than 25 MiB." : activeTool === "excelToPdf" ? "Please select an XLSX or XLS file." : activeTool === "powerpointToPdf" ? "Please select a PPTX file." : "Please select a valid PDF file.");
     } else if (added.length) {
       if (activeTool === "textEdit") cancelEditorSession();
+      if (activeTool === "reorder") {
+        const insertionAfterPageId = organizePages.reduce<string | null>((lastSelectedPageId, page) => (
+          selectedOrganizePageIds.has(page.id) ? page.id : lastSelectedPageId
+        ), null);
+        added.forEach((file) => organizeInsertionAnchorsRef.current.set(file, insertionAfterPageId));
+        setSelectedOrganizePageIds(new Set());
+      }
       setIsPreparingFiles(true);
       setProgressPercent(activeTool === "textEdit" ? 0 : 5);
       if (activeTool === "textEdit") {
@@ -2211,6 +2413,90 @@ export default function PdfToolsPage() {
     setDraggedFileIndex(null);
   }
 
+  function toggleOrganizePageSelection(pageId: string) {
+    setSelectedOrganizePageIds((current) => {
+      const next = new Set(current);
+      if (next.has(pageId)) next.delete(pageId);
+      else next.add(pageId);
+      return next;
+    });
+  }
+
+  function selectAllOrganizePages() {
+    setSelectedOrganizePageIds(new Set(organizePages.map((page) => page.id)));
+  }
+
+  function removeOrganizePages(pageIds: Set<string>, successMessage: string) {
+    const removablePageIds = new Set(organizePages.filter((page) => pageIds.has(page.id)).map((page) => page.id));
+    if (!removablePageIds.size) return;
+    if (removablePageIds.size >= organizePages.length) {
+      setError("Keep at least one page in the organizer, or clear the files to start again.");
+      return;
+    }
+    setOrganizePages((current) => current.filter((page) => !removablePageIds.has(page.id)));
+    setSelectedOrganizePageIds((current) => new Set([...current].filter((pageId) => !removablePageIds.has(pageId))));
+    setError("");
+    setStatus(successMessage);
+  }
+
+  function removeSelectedOrganizePages() {
+    removeOrganizePages(selectedOrganizePageIds, "Selected pages were removed. The remaining sequence is ready to organize.");
+  }
+
+  function removeOrganizePage(pageId: string) {
+    removeOrganizePages(new Set([pageId]), "The page was removed. The remaining sequence is ready to organize.");
+  }
+
+  function moveOrganizePageToTarget(targetPageId: string, placement: OrganizeDropTarget["placement"]) {
+    if (!draggedOrganizePageId || draggedOrganizePageId === targetPageId) {
+      setDraggedOrganizePageId(null);
+      setOrganizeDropTarget(null);
+      stopOrganizeAutoScroll();
+      return;
+    }
+    setOrganizePages((current) => {
+      const sourceIndex = current.findIndex((page) => page.id === draggedOrganizePageId);
+      const targetIndex = current.findIndex((page) => page.id === targetPageId);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      const next = [...current];
+      const [movedPage] = next.splice(sourceIndex, 1);
+      const adjustedTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+      next.splice(placement === "before" ? adjustedTargetIndex : adjustedTargetIndex + 1, 0, movedPage);
+      return next;
+    });
+    setDraggedOrganizePageId(null);
+    setOrganizeDropTarget(null);
+    stopOrganizeAutoScroll();
+  }
+
+  function moveOrganizePageToBoundary(placement: "start" | "end") {
+    if (!draggedOrganizePageId) return;
+    setOrganizePages((current) => {
+      const sourceIndex = current.findIndex((page) => page.id === draggedOrganizePageId);
+      if (sourceIndex < 0) return current;
+      const next = [...current];
+      const [movedPage] = next.splice(sourceIndex, 1);
+      next.splice(placement === "start" ? 0 : next.length, 0, movedPage);
+      return next;
+    });
+    setDraggedOrganizePageId(null);
+    setOrganizeDropTarget(null);
+    stopOrganizeAutoScroll();
+  }
+
+  function applyOrganizePageOrder() {
+    try {
+      const pageIndexes = parsePageSelection(pageSelection, organizePages.length, true);
+      if (!pageIndexes.length) throw new Error("Enter at least one page number.");
+      setOrganizePages((current) => pageIndexes.map((pageIndex) => current[pageIndex]));
+      setSelectedOrganizePageIds(new Set());
+      setError("");
+      setStatus("The advanced page order was applied to the thumbnail sequence.");
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "The page order could not be applied.");
+    }
+  }
+
   async function runTool() {
     setError("");
     setStatus("");
@@ -2235,6 +2521,28 @@ export default function PdfToolsPage() {
         updateProcessingProgress(75, "Saving the merged PDF...");
         downloadPdf(await merged.save({ useObjectStreams: true }), "merged-document.pdf");
         completeSuccessfulDownload(`${files.length} PDFs were merged. Your download has started.`);
+        return;
+      }
+
+      if (activeTool === "reorder") {
+        if (!organizePages.length) throw new Error("Add at least one PDF page before organizing your download.");
+        const organized = await PDFDocument.create();
+        const sourcePdfs = new Map<File, PDFDocument>();
+        for (const [index, organizePage] of organizePages.entries()) {
+          let sourcePdf = sourcePdfs.get(organizePage.file);
+          if (!sourcePdf) {
+            updateProcessingProgress(10 + (index / organizePages.length) * 45, `Opening File ${organizePage.sourceFileNumber}...`);
+            sourcePdf = await openPdf(organizePage.file);
+            sourcePdfs.set(organizePage.file, sourcePdf);
+          }
+          const [copiedPage] = await organized.copyPages(sourcePdf, [organizePage.sourcePageIndex]);
+          organized.addPage(copiedPage);
+          updateProcessingProgress(20 + ((index + 1) / organizePages.length) * 60, `Adding page ${index + 1} of ${organizePages.length}...`);
+          await yieldToBrowser();
+        }
+        updateProcessingProgress(90, "Saving your organized PDF...");
+        downloadPdf(await organized.save({ useObjectStreams: true }), outputName(files[0].name, "organized-pages"));
+        completeSuccessfulDownload("Your organized PDF is ready. The download has started.");
         return;
       }
 
@@ -2550,7 +2858,7 @@ export default function PdfToolsPage() {
         return;
       }
 
-      const pageIndexes = parsePageSelection(pageSelection, sourcePdf.getPageCount(), activeTool === "reorder");
+      const pageIndexes = parsePageSelection(pageSelection, sourcePdf.getPageCount());
 
       if (activeTool === "split") {
         const zip = new JSZip();
@@ -2565,12 +2873,12 @@ export default function PdfToolsPage() {
         return;
       }
 
-      if (activeTool === "extract" || activeTool === "reorder") {
-        updateProcessingProgress(40, activeTool === "extract" ? "Copying selected PDF pages..." : "Reordering selected PDF pages...");
+      if (activeTool === "extract") {
+        updateProcessingProgress(40, "Copying selected PDF pages...");
         const result = await selectedCopy(sourcePdf, pageIndexes);
         updateProcessingProgress(85, "Saving your PDF...");
-        downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, activeTool === "extract" ? "selected-pages" : "reordered"));
-        completeSuccessfulDownload(activeTool === "extract" ? "The PDF with the selected pages is ready." : "The page order was updated. Your download has started.");
+        downloadPdf(await result.save({ useObjectStreams: true }), outputName(sourceFile.name, "selected-pages"));
+        completeSuccessfulDownload("The PDF with the selected pages is ready.");
         return;
       }
 
@@ -2674,7 +2982,7 @@ export default function PdfToolsPage() {
   }
 
   const accept = isImageInput ? "image/jpeg,image/png,.jpg,.jpeg,.png" : activeTool === "wordToPdf" ? ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" : activeTool === "excelToPdf" ? ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" : activeTool === "powerpointToPdf" ? ".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" : acceptsPdfOrImage ? "application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" : "application/pdf,.pdf";
-  const uploadLabel = isImageInput ? "Choose JPG or PNG images" : activeTool === "wordToPdf" ? "Choose a DOCX file" : activeTool === "excelToPdf" ? "Choose an XLSX or XLS file" : activeTool === "powerpointToPdf" ? "Choose a PPTX file" : acceptsPdfOrImage ? "Choose a PDF, JPG, or PNG file" : activeTool === "merge" ? "Choose PDF files" : "Choose a PDF file";
+  const uploadLabel = isImageInput ? "Choose JPG or PNG images" : activeTool === "wordToPdf" ? "Choose a DOCX file" : activeTool === "excelToPdf" ? "Choose an XLSX or XLS file" : activeTool === "powerpointToPdf" ? "Choose a PPTX file" : acceptsPdfOrImage ? "Choose a PDF, JPG, or PNG file" : activeTool === "merge" || activeTool === "reorder" ? "Choose PDF files" : "Choose a PDF file";
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
@@ -2727,11 +3035,111 @@ export default function PdfToolsPage() {
       <section className={activeTool === "textEdit" && files.length ? "w-auto px-3 py-4 sm:px-5" : "w-full px-3 py-5 sm:px-5 sm:py-7"}>
 
         <section className={`relative min-w-0 bg-white ${activeTool === "textEdit" && files.length ? "" : "rounded-2xl border border-slate-200 p-5 shadow-sm sm:p-8"}`}>
-          <div className={activeTool === "textEdit" ? "" : "grid min-w-0 grid-cols-[minmax(0,1fr)_20rem] gap-5"} style={activeTool === "textEdit" ? undefined : { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 20rem", gap: "1.25rem" }}>
+          <div className={activeTool === "textEdit" ? "" : activeTool === "reorder" ? "grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]" : "grid min-w-0 grid-cols-[minmax(0,1fr)_20rem] gap-5"} style={activeTool === "textEdit" || activeTool === "reorder" ? undefined : { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 20rem", gap: "1.25rem" }}>
             <div className={activeTool === "textEdit" ? "" : "min-w-0"}>
-          {!usesLargeUploadPanel && <><h2 data-no-translate className="text-2xl font-bold text-slate-950">{activeDetails.title}</h2><p data-no-translate className="mt-2 text-slate-600">{activeDetails.description}</p></>}
+          {!usesLargeUploadPanel && activeTool !== "reorder" && <><h2 data-no-translate className="text-2xl font-bold text-slate-950">{activeDetails.title}</h2><p data-no-translate className="mt-2 text-slate-600">{activeDetails.description}</p></>}
 
-          {activeTool === "textEdit" && files.length ? <section className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 shadow-sm">
+          {activeTool === "reorder" ? (
+            <section
+              onDragEnter={(event) => {
+                if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+                event.preventDefault();
+                externalDragDepth.current += 1;
+                setIsDragging(true);
+              }}
+              onDragOver={(event) => {
+                if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+              }}
+              onDragLeave={(event) => {
+                if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+                externalDragDepth.current = Math.max(0, externalDragDepth.current - 1);
+                if (externalDragDepth.current === 0) setIsDragging(false);
+              }}
+              onDrop={handleDrop}
+              className={`overflow-hidden rounded-2xl border-2 border-dashed transition ${isDragging ? "border-blue-600 bg-blue-50 ring-2 ring-blue-200" : "border-slate-200 bg-slate-50"}`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4 sm:px-5">
+                <div><h2 data-no-translate className="text-lg font-bold text-slate-950">Page sequence</h2><p className="mt-1 text-sm text-slate-600">Drag page thumbnails to reorder them. Click a page to select it.</p></div>
+                <div className="flex flex-wrap items-center gap-2"><label className="cursor-pointer rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-blue-700">Add Pages<input className="sr-only" type="file" accept={accept} multiple onChange={handleFiles} /></label>{files.length > 0 && <button type="button" onClick={clearSelectedFiles} className="rounded-lg px-3 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 hover:text-blue-900">Clear</button>}</div>
+              </div>
+              {!files.length ? (
+                <div className="flex min-h-[30rem] flex-col items-center justify-center px-5 py-9 text-center"><span data-no-translate className="text-lg font-bold text-slate-900">{isDragging ? "Drop PDF files here" : "Add PDF files to organize"}</span><span className="mt-2 max-w-md text-sm leading-6 text-slate-600">Every page will appear as a thumbnail. You can add more PDFs later and arrange all pages together.</span><label className="mt-5 cursor-pointer rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-700">Add Pages<input className="sr-only" type="file" accept={accept} multiple onChange={handleFiles} /></label></div>
+              ) : (
+                <div className="p-3 sm:p-5">
+                  <p data-no-translate className="mb-3 text-xs font-semibold text-slate-600">{organizePages.length} page{organizePages.length === 1 ? "" : "s"} in the current sequence{isPreparingFiles ? " · Preparing thumbnails..." : ""}</p>
+                  {organizePages.length > 0 ? <div
+                    ref={organizePageListRef}
+                    aria-label="Organize PDF pages"
+                    onDragOver={(event) => {
+                      if (!draggedOrganizePageId) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      updateOrganizeAutoScroll(event.clientY);
+                    }}
+                    onDragLeave={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                        setOrganizeDropTarget(null);
+                        stopOrganizeAutoScroll();
+                      }
+                    }}
+                    onDrop={(event) => {
+                      if (!draggedOrganizePageId) return;
+                      event.preventDefault();
+                      moveOrganizePageToBoundary("end");
+                    }}
+                    className="grid max-h-[calc(100vh-15rem)] min-h-[30rem] grid-cols-1 gap-3 overflow-y-auto overscroll-contain pr-1 min-[390px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4"
+                  >
+                    {organizePages.map((page, overallIndex) => {
+                      const selected = selectedOrganizePageIds.has(page.id);
+                      const dragging = draggedOrganizePageId === page.id;
+                      const isDropTarget = organizeDropTarget?.pageId === page.id;
+                      return <article
+                        key={page.id}
+                        draggable
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", page.id);
+                          window.getSelection?.()?.removeAllRanges();
+                          setDraggedOrganizePageId(page.id);
+                        }}
+                        onDragOver={(event) => {
+                          if (!draggedOrganizePageId) return;
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                          const bounds = event.currentTarget.getBoundingClientRect();
+                          const placement = event.clientY < bounds.top + (bounds.height / 2) ? "before" : "after";
+                          setOrganizeDropTarget((current) => current?.pageId === page.id && current.placement === placement ? current : { pageId: page.id, placement });
+                          updateOrganizeAutoScroll(event.clientY);
+                        }}
+                        onDrop={(event) => {
+                          if (!draggedOrganizePageId) return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          moveOrganizePageToTarget(page.id, organizeDropTarget?.pageId === page.id ? organizeDropTarget.placement : "after");
+                        }}
+                        onDragEnd={() => {
+                          setDraggedOrganizePageId(null);
+                          setOrganizeDropTarget(null);
+                          stopOrganizeAutoScroll();
+                        }}
+                        className={`group relative select-none overflow-hidden rounded-xl border bg-white text-left shadow-sm transition ${selected ? "border-blue-600 ring-2 ring-blue-200" : "border-slate-200 hover:border-blue-400"} ${dragging ? "cursor-grabbing opacity-50" : "cursor-grab active:cursor-grabbing"}`}
+                      >
+                        {isDropTarget && <span aria-hidden="true" className={`pointer-events-none absolute inset-x-2 z-20 h-1 rounded-full bg-blue-600 shadow-sm ${organizeDropTarget.placement === "before" ? "top-0" : "bottom-0"}`} />}
+                        <button type="button" aria-pressed={selected} onClick={() => toggleOrganizePageSelection(page.id)} className="block w-full text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500">
+                          <div className="relative aspect-[0.72] overflow-hidden bg-slate-100"><img src={page.thumbnail} alt={`Page ${overallIndex + 1}: File ${page.sourceFileNumber}, Page ${page.sourcePageIndex + 1}`} draggable={false} className="h-full w-full object-contain" /><span className="absolute left-2 top-2 rounded-md bg-slate-950/85 px-2 py-1 text-xs font-bold text-white">Page {overallIndex + 1}</span></div>
+                          <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-3 py-2.5"><span className="truncate text-xs font-bold text-slate-800">File {page.sourceFileNumber} • Page {page.sourcePageIndex + 1}</span><span aria-hidden="true" className="shrink-0 text-slate-400">↕</span></div>
+                        </button>
+                        {selected && <button type="button" draggable={false} aria-label={`Remove page ${overallIndex + 1}`} title="Remove page" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); removeOrganizePage(page.id); }} className="absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-full border border-red-200 bg-white/95 text-red-700 shadow-sm transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-300"><X aria-hidden="true" className="h-4 w-4" /></button>}
+                      </article>;
+                    })}
+                  </div> : <div className="flex min-h-[30rem] items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm leading-6 text-slate-600">Preparing your page thumbnails…</div>}
+                </div>
+              )}
+              {isPreparingFiles && <div className="border-t border-blue-100 bg-blue-50 p-4"><ProgressMeter title="Preparing PDF pages" message={status || "Rendering page thumbnails locally."} progress={progressPercent} /></div>}
+            </section>
+          ) : activeTool === "textEdit" && files.length ? <section className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 shadow-sm">
             <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-[0.14em] text-blue-700">Editing locally</p><p className="mt-1 truncate font-bold text-slate-900" title={files[0].name}>{files[0].name}</p><p data-no-translate className="mt-1 text-xs text-slate-600">{editorPageCount ? `${editablePdfPages.length} of ${editorPageCount} pages ready · ${formatBytes(files[0].size)}` : "Preparing PDF preview..."}</p></div>
             <div className="flex shrink-0 items-center gap-2"><label className="cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700">Replace PDF<input className="sr-only" type="file" accept={accept} onChange={handleFiles} /></label><button type="button" onClick={clearSelectedFiles} className="rounded-lg px-3 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 hover:text-blue-900">Close</button></div>
             {isPreparingFiles && <div className="basis-full"><ProgressMeter title="Preparing your PDF" message={editorLoadingMessage || "Preparing the first editable page locally."} progress={progressPercent} /></div>}
@@ -2818,7 +3226,7 @@ export default function PdfToolsPage() {
             {isPreparingFiles && <div className="absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-white/90 p-5 backdrop-blur-[1px]"><div className="w-full max-w-md"><ProgressMeter title="Preparing selected file" message={preparationMessage} progress={progressPercent} /></div></div>}
           </div>}
 
-          {needsPages && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : activeTool === "reorder" ? "New page order" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder={activeTool === "reorder" ? "e.g. 3, 1, 2" : "All pages (or e.g. 1, 3-5)"} className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Leave blank to select all pages.</span></label>}
+          {needsPages && activeTool !== "reorder" && <label className="mt-6 block"><span className="text-sm font-bold text-slate-800">{activeTool === "delete" ? "Pages to delete" : "Pages to process"}</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder="All pages (or e.g. 1, 3-5)" className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /><span className="mt-2 block text-xs text-slate-500">Leave blank to select all pages.</span></label>}
 
           {activeTool === "rotate" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Rotate clockwise</span><select value={rotation} onChange={(event) => setRotation(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value={90}>90 degrees</option><option value={180}>180 degrees</option><option value={270}>270 degrees</option></select></label>}
           {activeTool === "pdfToImage" && <label className="mt-5 block"><span className="text-sm font-bold text-slate-800">Image format</span><select value={imageFormat} onChange={(event) => setImageFormat(event.target.value as "png" | "jpg")} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"><option value="png">PNG (best quality)</option><option value="jpg">JPG (smaller files)</option></select></label>}
@@ -2936,7 +3344,26 @@ export default function PdfToolsPage() {
           {activeTool === "unlock" && <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">The unlock copy recreates pages as a high-quality visual PDF. A password is required, and searchable text is not preserved.</p>}
 
             </div>
-            {activeTool !== "textEdit" && <aside className={`sticky top-5 flex min-h-[calc(100vh-10rem)] flex-col rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm max-[480px]:static max-[480px]:min-h-0 max-[480px]:p-4 ${usesTallActionSidebar ? "self-stretch" : "self-start"}`} style={actionSidebarMinHeight ? { minHeight: actionSidebarMinHeight } : undefined}>
+            {activeTool === "reorder" ? <aside className="flex min-h-[34rem] min-w-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm lg:sticky lg:top-5 lg:h-[min(47rem,calc(100vh-10rem))] lg:min-h-0 lg:p-5">
+              <div>
+                <h3 data-no-translate className="text-lg font-bold text-slate-950">Organize Pages</h3>
+                <p data-no-translate className="mt-1 text-sm leading-5 text-slate-600">Arrange, add or remove PDF pages in the order you need.</p>
+              </div>
+              <section className="mt-5 flex min-h-0 flex-1 flex-col border-t border-slate-200 pt-4">
+                <div className="flex flex-wrap gap-2"><label className="cursor-pointer rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-blue-700">Add Pages<input className="sr-only" type="file" accept={accept} multiple onChange={handleFiles} /></label><button type="button" onClick={selectAllOrganizePages} disabled={!organizePages.length} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-blue-50 hover:text-blue-800 disabled:cursor-not-allowed disabled:opacity-40">Select All</button><button type="button" onClick={removeSelectedOrganizePages} disabled={!selectedOrganizePageIds.size} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">Remove Selected</button></div>
+                <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">Page selection · {selectedOrganizePageIds.size} selected</div>
+                  <div aria-label="Page selection list" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
+                    {organizePages.length ? organizePages.map((page, overallIndex) => {
+                      const selected = selectedOrganizePageIds.has(page.id);
+                      return <button key={page.id} type="button" aria-pressed={selected} onClick={() => toggleOrganizePageSelection(page.id)} className={`mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition last:mb-0 ${selected ? "bg-blue-600 text-white" : "text-slate-700 hover:bg-blue-50 hover:text-blue-800"}`}><span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] font-bold ${selected ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{overallIndex + 1}</span><span className="min-w-0 flex-1 truncate">File {page.sourceFileNumber} • Page {page.sourcePageIndex + 1}</span></button>;
+                    }) : <p className="p-3 text-sm leading-5 text-slate-500">Add one or more PDFs to start organizing pages.</p>}
+                  </div>
+                </div>
+              </section>
+              <details className="mt-4 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600"><summary className="cursor-pointer font-bold text-slate-700">Advanced: enter a page sequence</summary><label className="mt-3 block"><span className="sr-only">Page sequence</span><input value={pageSelection} onChange={(event) => setPageSelection(event.target.value)} placeholder="e.g. 3, 1, 2" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label><button type="button" onClick={applyOrganizePageOrder} disabled={!organizePages.length || !pageSelection.trim()} className="mt-2 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-blue-100 hover:text-blue-800 disabled:cursor-not-allowed disabled:opacity-40">Apply sequence</button><p className="mt-2 leading-5">Uses the current overall page numbers. Omitted pages are removed.</p></details>
+              <div className="mt-4 border-t border-slate-200 pt-4">{error && <p role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-800">{error}</p>}{status && <p role="status" className="mb-3 rounded-xl bg-emerald-50 p-3 text-sm font-medium text-emerald-800">{status}</p>}{isWorking && <div className="mb-3"><ProgressMeter title="Organizing your pages" message={status || "Creating your PDF locally in the browser."} progress={progressPercent} /></div>}<button data-no-translate type="button" onClick={runTool} disabled={isWorking || isPreparingFiles || !organizePages.length} className="w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">{isWorking ? "Organizing..." : "Organize & Download"}</button><p className="mt-3 text-center text-xs leading-5 text-slate-500">Pages are organized locally in your browser.</p></div>
+            </aside> : activeTool !== "textEdit" && <aside className={`sticky top-5 flex min-h-[calc(100vh-10rem)] flex-col rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm max-[480px]:static max-[480px]:min-h-0 max-[480px]:p-4 ${usesTallActionSidebar ? "self-stretch" : "self-start"}`} style={actionSidebarMinHeight ? { minHeight: actionSidebarMinHeight } : undefined}>
               <div className={usesCenteredActionSidebar ? "text-center" : undefined}>
                 <h3 data-no-translate className="text-lg font-bold text-slate-950">{activeDetails.title}</h3>
                 <p data-no-translate className="mt-1 text-sm leading-5 text-slate-600">{usesCenteredActionSidebar ? activeDetails.description : "Choose files and options on the left, then download your result here."}</p>
